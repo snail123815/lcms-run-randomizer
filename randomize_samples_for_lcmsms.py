@@ -403,7 +403,10 @@ def simulated_annealing(
     groups               Full group-tuple list for all items.
     weights              Per-group scoring weights.
     seed                 RNG seed (ensures reproducibility).
-    max_iter             Maximum number of swap proposals.
+    max_iter             Total iteration budget across all restarts.  When
+                         stagnation is detected the current run is abandoned
+                         and a fresh random ordering is tried; iterations are
+                         counted globally so max_iter is never exceeded.
     prefix_last          Index of the last item in the already-fixed prefix,
                          or None.  Used so the cross-boundary transition is
                          included in scoring.
@@ -441,81 +444,106 @@ def simulated_annealing(
     # T_start covers typical diversity deltas; balance term is same scale by design.
     T_start = max(1.0, sum(weights))
 
-    # Compute alpha so T decays from T_start to T_min over 80 % of max_iter.
-    cooling_steps = max(1, int(0.8 * max_iter))
+    # Each restart uses a fixed iteration budget for its temperature schedule so
+    # that T decays fully from T_start to T_min regardless of how many restarts
+    # remain in the overall max_iter budget.
+    restart_budget = max(10_000, 100 * n)
+    cooling_steps = max(1, int(0.8 * restart_budget))
     alpha = (T_min / T_start) ** (1.0 / cooling_steps)
 
-    # Random initial ordering.
-    order = list(indices)
-    rng.shuffle(order)
+    # Stagnation limit per restart: consecutive steps without a new global best.
+    # At half the restart budget the temperature is already near T_min, so no
+    # further meaningful exploration is expected — restart instead.
+    stagnation_limit = max(restart_budget // 2, 1_000)
 
-    # Initialise tracker: start from a copy of the prefix tracker (so prefix
-    # transition counts act as background for the balance penalty), then add
-    # the current row_group's transitions on top.
-    tracker = (
-        prefix_tracker.copy()
-        if prefix_tracker is not None
-        else TransitionTracker(len(weights))
-    )
-    if prefix_last is not None:
-        tracker.add(groups[prefix_last], groups[order[0]])
-    for k in range(n - 1):
-        tracker.add(groups[order[k]], groups[order[k + 1]])
+    best_order: list[int] = []
+    best_score = -math.inf
+    total_iters = 0
+    n_restarts = 0
 
-    diversity = score_sequence(order, groups, weights, prefix_last)
-    current_score = diversity - lambda_balance * tracker.balance_penalty(
-        weights
-    )
-    best_order = list(order)
-    best_score = current_score
+    while total_iters < max_iter:
+        # ── Fresh restart: new random ordering ──────────────────────────────
+        order = list(indices)
+        rng.shuffle(order)
 
-    T = T_start
-    stagnation_limit = max(2000, 20 * n)
-    stagnation_counter = 0
-
-    for _ in range(max_iter):
-        # Propose a swap of two distinct positions.
-        i = rng.randrange(n)
-        j = rng.randrange(n - 1)
-        if j >= i:
-            j += 1
-        if i > j:
-            i, j = j, i
-
-        old_trans, new_trans = get_affected_transitions(
-            order, groups, i, j, prefix_last
+        # Initialise tracker from a copy of the prefix tracker, then layer the
+        # current row_group's transitions on top.
+        tracker = (
+            prefix_tracker.copy()
+            if prefix_tracker is not None
+            else TransitionTracker(len(weights))
         )
-        delta_div = sum(
-            score_transition(a, b, weights) for a, b in new_trans
-        ) - sum(score_transition(a, b, weights) for a, b in old_trans)
-        delta_bal = tracker.delta_balance_penalty(old_trans, new_trans, weights)
-        delta = delta_div - lambda_balance * delta_bal
+        if prefix_last is not None:
+            tracker.add(groups[prefix_last], groups[order[0]])
+        for ki in range(n - 1):
+            tracker.add(groups[order[ki]], groups[order[ki + 1]])
 
-        # Accept if improvement, or probabilistically while temperature is warm.
-        accept = delta > 0 or (T > T_min and rng.random() < math.exp(delta / T))
+        diversity = score_sequence(order, groups, weights, prefix_last)
+        current_score = diversity - lambda_balance * tracker.balance_penalty(
+            weights
+        )
 
-        found_new_best = False
-        if accept:
-            order[i], order[j] = order[j], order[i]
-            current_score += delta
-            # Update tracker: remove transitions that no longer exist, add new ones.
-            for ga, gb in old_trans:
-                tracker.remove(ga, gb)
-            for ga, gb in new_trans:
-                tracker.add(ga, gb)
-            if current_score > best_score + 1e-9:
-                best_score = current_score
-                best_order = list(order)
-                stagnation_counter = 0
-                found_new_best = True
+        if current_score > best_score:
+            best_score = current_score
+            best_order = list(order)
 
-        if not found_new_best:
-            stagnation_counter += 1
-            if stagnation_counter >= stagnation_limit:
-                break
+        T = T_start
+        stagnation_counter = 0
+        n_restarts += 1
 
-        T = max(T * alpha, T_min)
+        for _ in range(max_iter - total_iters):
+            total_iters += 1
 
+            # Propose a swap of two distinct positions.
+            i = rng.randrange(n)
+            j = rng.randrange(n - 1)
+            if j >= i:
+                j += 1
+            if i > j:
+                i, j = j, i
+
+            old_trans, new_trans = get_affected_transitions(
+                order, groups, i, j, prefix_last
+            )
+            delta_div = sum(
+                score_transition(a, b, weights) for a, b in new_trans
+            ) - sum(score_transition(a, b, weights) for a, b in old_trans)
+            delta_bal = tracker.delta_balance_penalty(
+                old_trans, new_trans, weights
+            )
+            delta = delta_div - lambda_balance * delta_bal
+
+            # Accept if improvement, or probabilistically while temperature is warm.
+            accept = delta > 0 or (
+                T > T_min and rng.random() < math.exp(delta / T)
+            )
+
+            found_new_best = False
+            if accept:
+                order[i], order[j] = order[j], order[i]
+                current_score += delta
+                # Update tracker: remove transitions that no longer exist, add new ones.
+                for ga, gb in old_trans:
+                    tracker.remove(ga, gb)
+                for ga, gb in new_trans:
+                    tracker.add(ga, gb)
+                if current_score > best_score + 1e-9:
+                    best_score = current_score
+                    best_order = list(order)
+                    stagnation_counter = 0
+                    found_new_best = True
+
+            if not found_new_best:
+                stagnation_counter += 1
+                if stagnation_counter >= stagnation_limit:
+                    break  # stagnated — trigger a fresh restart
+
+            T = max(T * alpha, T_min)
+
+    print(
+        f"#   SA: {n_restarts} restart(s), {total_iters} total iteration(s)",
+        file=sys.stderr,
+    )
     return best_order, best_score
 
 
@@ -613,15 +641,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="INT",
         help=(
-            "Max SA iterations per row_group (default: 50 000 × row_group size). "
-            "Stagnation-based early stopping applies regardless of this limit."
+            "Total SA iteration budget per row_group across all restarts "
+            "(default: 50 000 × row_group size). "
+            "When stagnation is detected the run restarts from a new random ordering; "
+            "the budget counts all iterations across restarts."
         ),
     )
     p.add_argument(
         "input",
-        nargs="?",
+        type=Path,
         metavar="FILE",
-        default="to_randomise.txt",
         help=(
             "Path to the input file containing sample names (positional). "
             "Default: 'to_randomise.txt' in the current directory."
@@ -646,7 +675,7 @@ def main() -> None:
     args = build_parser().parse_args()
 
     # ── Read & parse input ─────────────────────────────────────────────────
-    input_path = Path(args.input)
+    input_path = args.input
     if not input_path.exists():
         sys.exit(f"Error: '{input_path.resolve()}' not found.")
 
