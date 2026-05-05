@@ -67,8 +67,12 @@ After each row_group and for the whole run, three metrics are shown:
               100 % = every consecutive pair differs in every condition group
               that has more than one unique value within that row_group.
               The theoretical maximum accounts for groups that are constant
-              within a row_group (e.g. fixed by --fix-sort); only the single
-              cross-boundary transition may score for those groups.
+              within a row_group (e.g. fixed by --fix-sort):
+              – Per row_group: fixed groups contribute only via the single
+                cross-boundary transition (prefix_last → first item).
+              – Overall (with --fix-sort): fixed groups are excluded from
+                within-group transitions and only counted at the
+                row_group-boundary transitions.
 
   Balance     per-group ratio of the Cauchy–Schwarz ideal sum-of-squares to
               the actual sum-of-squares of directed transition counts.
@@ -82,10 +86,11 @@ After each row_group and for the whole run, three metrics are shown:
 
 Input / Output
 --------------
-Input : file specified via --input (default: 'to_randomise.txt' in the current
+Input : positional FILE argument (default: 'to_randomise.txt' in the current
         working directory).  Only the first whitespace-separated token on each
         non-empty line is used.  Each token is split on '_' to obtain per-group values.
-Output: randomized list, one item per line, to stdout.
+Output: randomized list, one item per line, to stdout.  When --fix-sort is used,
+        a blank line is inserted between each row_group's items.
 Info  : diagnostic / progress messages to stderr.
 """
 
@@ -307,6 +312,8 @@ def _compute_diversity_quality(
     unique_per_group: list[list[str]],
     local_items: Optional[list[int]] = None,
     prefix_last: Optional[int] = None,
+    fix_indices: Optional[list[int]] = None,
+    n_row_group_boundaries: int = 0,
 ) -> tuple[float, float]:
     """
     Return (actual_diversity, max_possible_diversity).
@@ -322,6 +329,15 @@ def _compute_diversity_quality(
       treated separately: for each group g it can score if any item in
       *local_items* differs from groups[prefix_last][g].
 
+    When *fix_indices* and *n_row_group_boundaries* are supplied (Overall
+    stats with --fix-sort), the max is computed as:
+
+      n_within * max_per_within  +  n_boundaries * max_per_cross
+
+    where max_per_within excludes fixed groups (they are constant inside each
+    row_group and can never score there) and max_per_cross includes all groups
+    (the key changes at every row_group boundary so fixed groups can score).
+
     When *local_items* is None, the legacy behaviour is used: max_per_trans is
     derived from *unique_per_group* (global) and applied uniformly to all
     transitions.
@@ -334,23 +350,42 @@ def _compute_diversity_quality(
         local_uniq = [
             set(groups[idx][g] for idx in local_items) for g in range(n_groups)
         ]
-        max_per_trans_within = sum(
-            w for g, w in enumerate(weights) if len(local_uniq[g]) > 1
-        )
-        n_cross = 1 if (prefix_last is not None and local_items) else 0
-        n_within = len(pairs) - n_cross
-        if prefix_last is not None and local_items:
-            max_per_trans_cross = sum(
+        if fix_indices is not None and n_row_group_boundaries > 0:
+            # Overall stats with --fix-sort: separate within vs. cross-boundary.
+            fix_set = set(fix_indices)
+            n_within = len(pairs) - n_row_group_boundaries
+            max_per_trans_within = sum(
                 w
                 for g, w in enumerate(weights)
-                if any(
-                    groups[idx][g] != groups[prefix_last][g]
-                    for idx in local_items
-                )
+                if g not in fix_set and len(local_uniq[g]) > 1
             )
-            max_possible = n_within * max_per_trans_within + max_per_trans_cross
+            max_per_trans_cross = sum(
+                w for g, w in enumerate(weights) if len(local_uniq[g]) > 1
+            )
+            max_possible = (
+                n_within * max_per_trans_within
+                + n_row_group_boundaries * max_per_trans_cross
+            )
         else:
-            max_possible = n_within * max_per_trans_within
+            max_per_trans_within = sum(
+                w for g, w in enumerate(weights) if len(local_uniq[g]) > 1
+            )
+            n_cross = 1 if (prefix_last is not None and local_items) else 0
+            n_within = len(pairs) - n_cross
+            if prefix_last is not None and local_items:
+                max_per_trans_cross = sum(
+                    w
+                    for g, w in enumerate(weights)
+                    if any(
+                        groups[idx][g] != groups[prefix_last][g]
+                        for idx in local_items
+                    )
+                )
+                max_possible = (
+                    n_within * max_per_trans_within + max_per_trans_cross
+                )
+            else:
+                max_possible = n_within * max_per_trans_within
     else:
         max_per_trans = sum(
             w for g, w in enumerate(weights) if len(unique_per_group[g]) > 1
@@ -454,15 +489,20 @@ def print_quality_stats(
     skip_groups: Optional[list[int]] = None,
     position_offset: int = 0,
     n_total: Optional[int] = None,
+    n_row_group_boundaries: int = 0,
 ) -> None:
     """
     Print interpretable quality statistics for *order* to stderr.
 
     Three metrics are reported:
 
-    Diversity   Fraction of the theoretical maximum diversity score achieved
-                (100% = every consecutive pair differs in every condition group
-                that has more than one unique value).
+    Diversity   Fraction of the theoretical maximum diversity score achieved.
+                For per-row_group stats, the max correctly excludes fixed groups
+                from within-group transitions (they are constant there) and
+                treats the cross-boundary transition separately.
+                For Overall stats (pass n_row_group_boundaries > 0), fixed
+                groups are excluded from the within-group max and only counted
+                at the n_row_group_boundaries cross-boundary transitions.
 
     Balance     For each group: ratio of the Cauchy–Schwarz ideal sum-of-squares
                 to the actual sum-of-squares of directed transition counts
@@ -494,6 +534,8 @@ def print_quality_stats(
         unique_per_group,
         local_items=order,
         prefix_last=prefix_last,
+        fix_indices=skip_groups if skip_groups else None,
+        n_row_group_boundaries=n_row_group_boundaries,
     )
     div_pct = 100.0 * actual_div / max_div if max_div > 0.0 else 100.0
 
@@ -1286,7 +1328,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=42,
         metavar="INT",
-        help="Random seed (required — ensures full reproducibility).",
+        help="Random seed (default: 42 — change to get a different randomization).",
     )
     p.add_argument(
         "--weight",
@@ -1453,6 +1495,7 @@ def main() -> None:
         skip_groups=fix_indices,
         position_offset=0,
         n_total=len(items),
+        n_row_group_boundaries=len(row_groups) - 1,
     )
 
     # ── Output ─────────────────────────────────────────────────────────────
