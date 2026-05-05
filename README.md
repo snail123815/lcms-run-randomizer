@@ -37,7 +37,8 @@ Samples can be grouped by one or more fixed condition(s) using `--fix-sort` (e.g
 
 ## Requirements
 
-- Python ≥ 3.10 (stdlib only: `argparse`, `math`, `random`, `sys`, `pathlib`)
+- Python ≥ 3.7 (stdlib only: `argparse`, `math`, `random`, `sys`, `pathlib`)
+- [`plotext`](https://pypi.org/project/plotext/) ≥ 5.0 *(optional, for `--plot`)*
 
 ---
 
