@@ -11,7 +11,7 @@ from randomize_samples_for_lcmsms import _parse_fix_sort, _parse_weights
 # Path to the script and the sample input file
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "randomize_samples_for_lcmsms.py"
-SAMPLE_INPUT = REPO_ROOT / "to_randomise.txt"
+SAMPLE_INPUT = Path(__file__).parent / "to_randomise.txt"
 
 # Keep integration tests fast: cap iterations to a small value.
 FAST_ITER = "1000"
@@ -89,9 +89,11 @@ class TestParseFixSort:
 
 @pytest.fixture(scope="module")
 def sample_input_lines():
-    """Return non-empty lines from to_randomise.txt, or skip if absent."""
+    """Return non-empty lines from tests/to_randomise.txt, or skip if absent."""
     if not SAMPLE_INPUT.exists():
-        pytest.skip("to_randomise.txt not found — skipping integration tests")
+        pytest.skip(
+            "tests/to_randomise.txt not found — skipping integration tests"
+        )
     lines = [
         ln.split()[0]
         for ln in SAMPLE_INPUT.read_text(encoding="utf-8").splitlines()

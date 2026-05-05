@@ -92,8 +92,7 @@ After each row_group and for the whole run, three metrics are shown:
 
 Input / Output
 --------------
-Input : positional FILE argument (default: 'to_randomise.txt' in the current
-        working directory).  Only the first whitespace-separated token on each
+Input : positional FILE argument.  Only the first whitespace-separated token on each
         non-empty line is used.  Each token is split on '_' to obtain per-group values.
 Output: randomized list, one item per line, to stdout.  When --fix-sort is used,
         a blank line is inserted between each row_group's items.
@@ -1589,9 +1588,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Randomize a sample list for LC-MS/MS, maximizing the diversity of\n"
             "consecutive condition transitions so that each unique condition value\n"
             "is followed by every other value with approximately equal frequency.\n\n"
-            "Input : positional input file (default: 'to_randomise.txt' in the current\n"
-            "         working directory; only the first whitespace-separated token per\n"
-            "         line is used)\n"
+            "Input : positional input file (only the first whitespace-separated token\n"
+            "         per line is used)\n"
             "Output: randomized list, one item per line, to stdout.\n"
             "Info  : diagnostic / progress output to stderr.\n\n"
             "Algorithm: Simulated Annealing with O(1) incremental score updates.\n"
@@ -1645,10 +1643,7 @@ def build_parser() -> argparse.ArgumentParser:
         "input",
         type=Path,
         metavar="FILE",
-        help=(
-            "Path to the input file containing sample names (positional). "
-            "Default: 'to_randomise.txt' in the current directory."
-        ),
+        help="Path to the input file containing sample names.",
     )
     p.add_argument(
         "--no-warn",

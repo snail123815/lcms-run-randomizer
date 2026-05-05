@@ -1,6 +1,3 @@
-# Example data
-to_randomise.txt
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

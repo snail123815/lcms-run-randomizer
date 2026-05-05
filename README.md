@@ -61,7 +61,7 @@ Diagnostics (group summaries, per-group transition statistics, scores) go to **s
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `FILE` (positional) | `to_randomise.txt` | Input file path |
+| `FILE` (positional) | *(required)* | Input file path |
 | `--seed INT` | `42` | Random seed — change to get a different randomization |
 | `--fix-sort GROUPS` | *(none)* | Comma-separated group indices used to pre-partition the list into sub-problems before randomizing (e.g. `2` or `1,2`) |
 | `--weight WEIGHTS` | `1,1,...` | Comma-separated per-group weights; higher weight = that group contributes more to the score |
