@@ -731,14 +731,15 @@ def _optimize_row_groups(
             f"score={best_score:.4f}  size={n_rg}  max_iter={max_iter}",
             file=sys.stderr,
         )
-        print_transition_stats(
-            best_order,
-            groups,
-            unique_per_group,
-            rg_prefix_last,
-            f"Row_group [{k}] key={rg_keys[k]}",
-            skip_groups=fix_indices,
-        )
+        if len(row_groups) > 1:
+            print_transition_stats(
+                best_order,
+                groups,
+                unique_per_group,
+                rg_prefix_last,
+                f"Row_group [{k}] key={rg_keys[k]}",
+                skip_groups=fix_indices,
+            )
 
         final_order.extend(best_order)
         prefix_last = best_order[-1] if best_order else prefix_last
