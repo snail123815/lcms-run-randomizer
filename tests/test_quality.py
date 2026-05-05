@@ -157,55 +157,25 @@ class TestBalanceQuality:
         pairs = _pairs([0, 1, 2, 3, 4, 5, 6])
         result = _compute_balance_quality(pairs, groups, unique_per_group, [])
         assert len(result) == 1
+        assert result[0] is not None
         actual_sq, ideal_sq = result[0]
         # T=6, m=2, q=3, r=0 → ideal = 2*9 = 18; actual = 9+9 = 18
         assert actual_sq == pytest.approx(18.0)
         assert ideal_sq == pytest.approx(18.0)
 
     def test_imbalanced(self):
-        # A→B = 3, B→A = 1 — uneven
-        groups = [("A",), ("B",), ("A",), ("B",), ("A",), ("A",)]
+        # 3× A→B and 1× B→A — genuinely uneven
+        # T=4, m=2, q=2, r=0 → ideal_sq = 2*(2²) = 8; actual_sq = 9+1 = 10
+        groups = [("A",), ("B",)]
         unique_per_group = [["A", "B"]]
-        pairs = _pairs([0, 1, 2, 3, 4, 5])
+        pairs = [(0, 1)] * 3 + [(1, 0)] * 1  # A→B=3, B→A=1
         result = _compute_balance_quality(pairs, groups, unique_per_group, [])
         assert len(result) == 1
+        assert result[0] is not None
         actual_sq, ideal_sq = result[0]
-        # Count off-diagonal: A→B appears at (0,1),(2,3),(4,5) = 3; B→A at (1,2),(3,4) = 2
-        # actual_sq = 9 + 4 = 13; T=5, m=2, q=2,r=1 → ideal = 1*4 + 1*9 = 13...
-        # Wait let me recalculate. pairs = (0,1),(1,2),(2,3),(3,4),(4,5)
-        # groups: 0=A,1=B,2=A,3=B,4=A,5=A
-        # (A→B): (0,1),(2,3) = 2 times
-        # (B→A): (1,2),(3,4) = 2 times
-        # (A→A): (4,5) = 1 time (same value, not counted)
-        # T=4, m=2, q=2, r=0 → ideal = 2*4 = 8; actual = 4+4 = 8 → perfectly balanced
-        # Hmm, not a useful test for imbalance. Let me use a different approach.
-        # Just assert it returns a 2-tuple (not None)
-        assert isinstance(result[0], tuple)
-
-    def test_truly_imbalanced(self):
-        # Only A→B transitions (B never followed by anything else)
-        # A B A B with prefix_last=B(1) → B→A, A→B, B→A (B→A=2, A→B=1)
-        groups = [("A",), ("B",), ("A",), ("B",)]
-        unique_per_group = [["A", "B"]]
-        # Manual pairs: (A→B), (B→A), (A→B) = 2 A→B, 1 B→A
-        pairs = [
-            (0, 1),  # A→B
-            (1, 2),  # B→A
-            (0, 1),  # A→B (duplicate to skew)
-        ]
-        result = _compute_balance_quality(pairs, groups, unique_per_group, [])
-        actual_sq, ideal_sq = result[0]
-        # T=3, m=2, q=1, r=1 → ideal = 1*1 + 1*4 = 5; actual = 4+1 = 5
-        # Actually this is balanced too (3 transitions over 2 pairs → floor)
-        # actual: A→B=2 (sq=4), B→A=1 (sq=1) → actual_sq=5; ideal=5 → 100%
-        # To get imbalance, we need a more skewed distribution
-        pairs2 = [(0, 1)] * 4 + [(1, 0)] * 1  # 4× A→B, 1× B→A
-        result2 = _compute_balance_quality(pairs2, groups, unique_per_group, [])
-        actual_sq2, ideal_sq2 = result2[0]
-        # T=5, m=2, q=2,r=1 → ideal = 1*4+1*9=13; actual=16+1=17
-        assert actual_sq2 == pytest.approx(17.0)
-        assert ideal_sq2 == pytest.approx(13.0)
-        assert ideal_sq2 < actual_sq2  # not perfectly balanced
+        assert actual_sq == pytest.approx(10.0)
+        assert ideal_sq == pytest.approx(8.0)
+        assert actual_sq > ideal_sq  # not perfectly balanced
 
     def test_single_unique_value_returns_none(self):
         # Group with only one unique value → m_g = 0 → None

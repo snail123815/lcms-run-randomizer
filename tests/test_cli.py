@@ -169,3 +169,18 @@ class TestIntegration:
         )
         assert result.returncode != 0
         assert "Error" in result.stderr
+
+    def test_priority_time_is_valid_permutation(self, sample_input_lines):
+        out = _run_script("--seed", "42", "--priority", "time")
+        assert sorted(out) == sorted(sample_input_lines)
+
+    def test_no_file_argument_exits_nonzero(self):
+        # Omitting the required FILE positional should cause argparse to exit
+        # with a non-zero return code and print a usage/error message.
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--no-warn"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "FILE" in result.stderr or "error" in result.stderr.lower()
