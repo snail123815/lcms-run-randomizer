@@ -92,14 +92,26 @@ def sample_input_lines():
     """Return non-empty lines from to_randomise.txt, or skip if absent."""
     if not SAMPLE_INPUT.exists():
         pytest.skip("to_randomise.txt not found — skipping integration tests")
-    lines = [ln.split()[0] for ln in SAMPLE_INPUT.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    lines = [
+        ln.split()[0]
+        for ln in SAMPLE_INPUT.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
     return lines
 
 
 def _run_script(*extra_args):
     """Run the script and return stdout lines (stripped)."""
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--no-warn", "--max-iter", FAST_ITER, *extra_args, str(SAMPLE_INPUT)],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--no-warn",
+            "--max-iter",
+            FAST_ITER,
+            *extra_args,
+            str(SAMPLE_INPUT),
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -129,7 +141,9 @@ class TestIntegration:
         assert sorted(out2) == sorted(sample_input_lines)
         # Warn rather than fail — theoretically identical by coincidence
         if out1 == out2:
-            pytest.skip("Seeds 1 and 999 produced the same order (unlikely but possible)")
+            pytest.skip(
+                "Seeds 1 and 999 produced the same order (unlikely but possible)"
+            )
 
     def test_fix_sort_output_is_permutation(self, sample_input_lines):
         out = _run_script("--seed", "42", "--fix-sort", "2")

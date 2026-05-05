@@ -13,7 +13,6 @@ from randomize_samples_for_lcmsms import (
     simulated_annealing,
 )
 
-
 # ---------------------------------------------------------------------------
 # _sa_hyperparams
 # ---------------------------------------------------------------------------
@@ -206,7 +205,9 @@ class TestSimulatedAnnealing:
     WEIGHTS = [1.0]
 
     def test_empty_indices(self):
-        order, score = simulated_annealing([], self.GROUPS_SMALL, self.WEIGHTS, 0, 100)
+        order, score = simulated_annealing(
+            [], self.GROUPS_SMALL, self.WEIGHTS, 0, 100
+        )
         assert order == []
         assert score == 0.0
 

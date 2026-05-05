@@ -154,7 +154,7 @@ full run sequence.
 ## Roadmap
 
 - [x] Check for weighted diversity effectiveness
-- [ ] Extract core functions into submodules (`scoring`, `io`, `annealing`)
+- [ ] ~~Extract core functions into submodules (`scoring`, `io`, `annealing`)~~
 - [ ] Plotting: transition heatmaps, score convergence curves
 - [ ] Support for Excel / CSV input
 
