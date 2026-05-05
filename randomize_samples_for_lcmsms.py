@@ -1155,7 +1155,12 @@ def simulated_annealing(
 def _bins_from_history(
     history: list[float], n_bins: int = 50
 ) -> tuple[list[float], list[float]]:
-    """Bin *history* into *n_bins* equal-width windows, return (xs, mean_ys)."""
+    """Bin *history* into *n_bins* equal-width windows, return (xs, mean_ys).
+
+    Note: mean aggregation can make the peak appear lower than the true maximum.
+    Use _bins_max_from_histories([history], n_bins) when the displayed maximum
+    must equal the actual peak score.
+    """
     n = len(history)
     bin_size = max(1, n // n_bins)
     xs: list[float] = []
@@ -1243,7 +1248,7 @@ def _plot_score_history(
         import plotext as plt  # type: ignore[import]
     except ImportError:
         print(
-            "# [--plot] 'plotext' not installed; skipping plot "
+            "#    [--plot] 'plotext' not installed; skipping plot "
             "(pip install plotext)",
             file=sys.stderr,
         )
@@ -1271,8 +1276,8 @@ def _plot_score_history(
         lines = lines[1:]
     while lines and lines[-1].strip() == "":
         lines.pop()
-    print(f"# SA score: {label}", file=sys.stderr)
-    print("\n".join("# " + ln for ln in lines), file=sys.stderr)
+    print(f"#   Plot of max of binned SA scores:", file=sys.stderr)
+    print("\n".join("#     " + ln for ln in lines), file=sys.stderr)
 
 
 def _build_plot_lines(
@@ -1322,8 +1327,8 @@ def _plot_split_restarts(
     """
     Print two side-by-side plots to stderr when there are many restarts.
 
-    Left  (25 data cols wide): score trace of the first restart (binned).
-    Right (25 data cols wide): best score achieved in each restart.
+    Left  : score trace of the best-scoring restart (binned).
+    Right : best score achieved in each restart.
 
     Each plot is built independently and then merged line-by-line to avoid
     relying on plotext's subplots API, which behaves inconsistently across
@@ -1335,7 +1340,7 @@ def _plot_split_restarts(
         import plotext as _plt  # noqa: F401 — just check availability
     except ImportError:
         print(
-            "# [--plot] 'plotext' not installed; skipping plot "
+            "#    [--plot] 'plotext' not installed; skipping plot "
             "(pip install plotext)",
             file=sys.stderr,
         )
@@ -1344,29 +1349,33 @@ def _plot_split_restarts(
     if not histories:
         return
 
-    # Left: first restart trace, trimmed to exclude the trailing flat region
-    first = _trim_trailing_flat(histories[0])
-    xs, ys = _bins_from_history(first, n_bins)
+    # Left: best-scoring restart trace, trimmed to exclude the trailing flat region.
+    # Use max-per-bin (not mean) so the left y-axis peak matches the right chart.
+    best_restart = max(histories, key=max)
+    best_restart_idx = histories.index(best_restart) + 1
+    trimmed = _trim_trailing_flat(best_restart)
+    xs, ys = _bins_max_from_histories([trimmed], n_bins)
     left_lines = _build_plot_lines(
         xs,
         ys,
         xlabel="iteration",
         ylabel="score",
-        title="restart 1 till peak",
-        width=27,
+        title=f"restart {best_restart_idx} (till plateau)",
+        width=34,
         height=22,
     )
 
-    # Right: best score per restart (x = restart number)
+    # Right: best score per restart (x = restart number).
+    # Inherit the left chart's y-axis range so both plots share the same scale.
     rx = [float(i) for i in range(1, len(histories) + 1)]
     ry = [max(h) for h in histories]
     right_lines = _build_plot_lines(
         rx,
         ry,
         xlabel="restart",
-        ylabel="best score",
-        title="all-restart max",
-        width=27,
+        ylabel="score",
+        title="all-restart best",
+        width=30,
         height=22,
     )
 
@@ -1379,8 +1388,12 @@ def _plot_split_restarts(
     right_lines += [""] * (n_rows - len(right_lines))
     merged = [l + gap + r for l, r in zip(left_lines, right_lines)]
 
-    print(f"# SA score: {label}", file=sys.stderr)
-    print("\n".join("# " + ln for ln in merged), file=sys.stderr)
+    print("#   Plots of max of binned SA scores:", file=sys.stderr)
+    print(
+        "#     Left: best-scoring restart trace; Right: best score per restart",
+        file=sys.stderr,
+    )
+    print("\n".join("#     " + ln for ln in merged), file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
