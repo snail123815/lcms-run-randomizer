@@ -198,23 +198,6 @@ def get_affected_transitions(
     return old, new
 
 
-def delta_score_swap(
-    order: list[int],
-    groups: list[tuple[str, ...]],
-    weights: list[float],
-    i: int,
-    j: int,
-    prefix_last: Optional[int] = None,
-) -> float:
-    """O(1) diversity-score change from swapping positions *i* and *j*."""
-    if i > j:
-        i, j = j, i
-    old, new = get_affected_transitions(order, groups, i, j, prefix_last)
-    return sum(score_transition(a, b, weights) for a, b in new) - sum(
-        score_transition(a, b, weights) for a, b in old
-    )
-
-
 def print_transition_stats(
     order: list[int],
     groups: list[tuple[str, ...]],
@@ -376,6 +359,153 @@ class TransitionTracker:
 # ---------------------------------------------------------------------------
 
 
+def _sa_hyperparams(
+    n: int,
+    weights: list[float],
+    n_total_trans: int,
+    T_min: float,
+) -> tuple[float, float, float, int]:
+    """
+    Derive SA hyper-parameters from problem dimensions.
+
+    Returns
+    -------
+    lambda_balance   Penalty scaling factor (1 / n_total_trans).
+    T_start          Initial temperature (≥ 1, covers max diversity delta).
+    alpha            Geometric cooling factor per step.
+    stagnation_limit Steps without a global-best improvement before restart.
+    """
+    lambda_balance = 1.0 / max(1, n_total_trans)
+    T_start = max(1.0, sum(weights))
+    restart_budget = max(10_000, 100 * n)
+    cooling_steps = max(1, int(0.8 * restart_budget))
+    alpha = (T_min / T_start) ** (1.0 / cooling_steps)
+    stagnation_limit = max(restart_budget // 2, 1_000)
+    return lambda_balance, T_start, alpha, stagnation_limit
+
+
+def _build_restart_tracker(
+    prefix_last: Optional[int],
+    prefix_tracker: Optional["TransitionTracker"],
+    order: list[int],
+    groups: list[tuple[str, ...]],
+    n_weights: int,
+) -> "TransitionTracker":
+    """
+    Build a fresh TransitionTracker for one SA restart.
+
+    Copies *prefix_tracker* (so the caller's tracker is never mutated) then
+    layers the transitions of the current *order* on top.
+    """
+    tracker = (
+        prefix_tracker.copy()
+        if prefix_tracker is not None
+        else TransitionTracker(n_weights)
+    )
+    if prefix_last is not None:
+        tracker.add(groups[prefix_last], groups[order[0]])
+    for ki in range(len(order) - 1):
+        tracker.add(groups[order[ki]], groups[order[ki + 1]])
+    return tracker
+
+
+def _run_single_restart(
+    rng: random.Random,
+    order: list[int],
+    groups: list[tuple[str, ...]],
+    weights: list[float],
+    prefix_last: Optional[int],
+    prefix_tracker: Optional["TransitionTracker"],
+    lambda_balance: float,
+    T_start: float,
+    alpha: float,
+    T_min: float,
+    stagnation_limit: int,
+    budget: int,
+    global_best_score: float,
+) -> tuple[Optional[list[int]], float, int]:
+    """
+    Run one SA restart starting from *order* (modified in place).
+
+    Stagnation is measured against *global_best_score* so the restart
+    terminates early if no improvement over the overall best is found.
+    If the initial shuffle already beats *global_best_score*, it is
+    recorded immediately — matching the original pre-loop check.
+
+    Returns
+    -------
+    best_order_if_improved   Best ordering found if it beats *global_best_score*;
+                             None if no improvement was made.
+    new_best_score           Highest score seen; equals *global_best_score* if
+                             no improvement was found.
+    iters_used               SA steps executed in this restart.
+    """
+    tracker = _build_restart_tracker(
+        prefix_last, prefix_tracker, order, groups, len(weights)
+    )
+    diversity = score_sequence(order, groups, weights, prefix_last)
+    current_score = diversity - lambda_balance * tracker.balance_penalty(
+        weights
+    )
+
+    current_best = global_best_score
+    best_order_found: Optional[list[int]] = None
+
+    # Check whether the initial shuffle already beats the global best (mirrors
+    # the pre-loop check in the original monolithic SA).
+    if current_score > current_best:
+        current_best = current_score
+        best_order_found = list(order)
+
+    T = T_start
+    stagnation_counter = 0
+    n = len(order)
+
+    for iters_used in range(1, budget + 1):
+        # Propose a swap of two distinct positions.
+        i = rng.randrange(n)
+        j = rng.randrange(n - 1)
+        if j >= i:
+            j += 1
+        if i > j:
+            i, j = j, i
+
+        old_trans, new_trans = get_affected_transitions(
+            order, groups, i, j, prefix_last
+        )
+        delta_div = sum(
+            score_transition(a, b, weights) for a, b in new_trans
+        ) - sum(score_transition(a, b, weights) for a, b in old_trans)
+        delta_bal = tracker.delta_balance_penalty(old_trans, new_trans, weights)
+        delta = delta_div - lambda_balance * delta_bal
+
+        # Accept if improvement, or probabilistically while temperature is warm.
+        accept = delta > 0 or (T > T_min and rng.random() < math.exp(delta / T))
+
+        found_new_best = False
+        if accept:
+            order[i], order[j] = order[j], order[i]
+            current_score += delta
+            for ga, gb in old_trans:
+                tracker.remove(ga, gb)
+            for ga, gb in new_trans:
+                tracker.add(ga, gb)
+            if current_score > current_best + 1e-9:
+                current_best = current_score
+                best_order_found = list(order)
+                stagnation_counter = 0
+                found_new_best = True
+
+        if not found_new_best:
+            stagnation_counter += 1
+            if stagnation_counter >= stagnation_limit:
+                return best_order_found, current_best, iters_used  # stagnated
+
+        T = max(T * alpha, T_min)
+
+    return best_order_found, current_best, budget
+
+
 def simulated_annealing(
     indices: list[int],
     groups: list[tuple[str, ...]],
@@ -390,12 +520,9 @@ def simulated_annealing(
     """
     Find a high-scoring ordering of *indices* using Simulated Annealing.
 
-    Optimises the combined score:
-
-        diversity_score  -  lambda * balance_penalty
-
-    where lambda = 1 / max(1, n_total_transitions) and n_total_transitions
-    includes both the already-fixed prefix and the current row_group.
+    Optimises:  diversity_score  -  lambda * balance_penalty  (higher = better).
+    Restarts from a fresh random ordering whenever stagnation is detected;
+    the global *max_iter* budget is shared across all restarts.
 
     Parameters
     ----------
@@ -403,25 +530,16 @@ def simulated_annealing(
     groups               Full group-tuple list for all items.
     weights              Per-group scoring weights.
     seed                 RNG seed (ensures reproducibility).
-    max_iter             Total iteration budget across all restarts.  When
-                         stagnation is detected the current run is abandoned
-                         and a fresh random ordering is tried; iterations are
-                         counted globally so max_iter is never exceeded.
-    prefix_last          Index of the last item in the already-fixed prefix,
-                         or None.  Used so the cross-boundary transition is
-                         included in scoring.
-    prefix_tracker       TransitionTracker pre-loaded with all transitions from
-                         already-fixed row_groups.  A copy is taken so the
-                         caller's tracker is never mutated.
-    n_prefix_transitions Number of transitions already recorded in
-                         *prefix_tracker* (used to scale lambda correctly).
-    T_min                Temperature floor; below this only improvements are
-                         accepted.
+    max_iter             Total iteration budget across all restarts.
+    prefix_last          Index of the last item in the already-fixed prefix.
+    prefix_tracker       TransitionTracker pre-loaded with prefix transitions.
+    n_prefix_transitions Transitions already in *prefix_tracker*.
+    T_min                Temperature floor; below this only improvements accepted.
 
     Returns
     -------
     best_order  Indices in the best ordering found.
-    best_score  Combined score of best_order.
+    best_score  Combined score of *best_order*.
     """
     rng = random.Random(seed)
     n = len(indices)
@@ -433,28 +551,11 @@ def simulated_annealing(
             list(indices), groups, weights, prefix_last
         )
 
-    # Total transitions = prefix + cross-boundary (if any) + within current group.
     n_cross = 1 if prefix_last is not None else 0
     n_total_trans = n_prefix_transitions + n_cross + (n - 1)
-
-    # Lambda scales the balance penalty relative to the full sequence length so
-    # that lambda * balance_penalty stays on the same order as diversity_score.
-    lambda_balance = 1.0 / max(1, n_total_trans)
-
-    # T_start covers typical diversity deltas; balance term is same scale by design.
-    T_start = max(1.0, sum(weights))
-
-    # Each restart uses a fixed iteration budget for its temperature schedule so
-    # that T decays fully from T_start to T_min regardless of how many restarts
-    # remain in the overall max_iter budget.
-    restart_budget = max(10_000, 100 * n)
-    cooling_steps = max(1, int(0.8 * restart_budget))
-    alpha = (T_min / T_start) ** (1.0 / cooling_steps)
-
-    # Stagnation limit per restart: consecutive steps without a new global best.
-    # At half the restart budget the temperature is already near T_min, so no
-    # further meaningful exploration is expected — restart instead.
-    stagnation_limit = max(restart_budget // 2, 1_000)
+    lambda_balance, T_start, alpha, stagnation_limit = _sa_hyperparams(
+        n, weights, n_total_trans, T_min
+    )
 
     best_order: list[int] = []
     best_score = -math.inf
@@ -462,83 +563,28 @@ def simulated_annealing(
     n_restarts = 0
 
     while total_iters < max_iter:
-        # ── Fresh restart: new random ordering ──────────────────────────────
         order = list(indices)
         rng.shuffle(order)
-
-        # Initialise tracker from a copy of the prefix tracker, then layer the
-        # current row_group's transitions on top.
-        tracker = (
-            prefix_tracker.copy()
-            if prefix_tracker is not None
-            else TransitionTracker(len(weights))
+        improved_order, new_best_score, iters_used = _run_single_restart(
+            rng,
+            order,
+            groups,
+            weights,
+            prefix_last,
+            prefix_tracker,
+            lambda_balance,
+            T_start,
+            alpha,
+            T_min,
+            stagnation_limit,
+            budget=max_iter - total_iters,
+            global_best_score=best_score,
         )
-        if prefix_last is not None:
-            tracker.add(groups[prefix_last], groups[order[0]])
-        for ki in range(n - 1):
-            tracker.add(groups[order[ki]], groups[order[ki + 1]])
-
-        diversity = score_sequence(order, groups, weights, prefix_last)
-        current_score = diversity - lambda_balance * tracker.balance_penalty(
-            weights
-        )
-
-        if current_score > best_score:
-            best_score = current_score
-            best_order = list(order)
-
-        T = T_start
-        stagnation_counter = 0
+        total_iters += iters_used
         n_restarts += 1
-
-        for _ in range(max_iter - total_iters):
-            total_iters += 1
-
-            # Propose a swap of two distinct positions.
-            i = rng.randrange(n)
-            j = rng.randrange(n - 1)
-            if j >= i:
-                j += 1
-            if i > j:
-                i, j = j, i
-
-            old_trans, new_trans = get_affected_transitions(
-                order, groups, i, j, prefix_last
-            )
-            delta_div = sum(
-                score_transition(a, b, weights) for a, b in new_trans
-            ) - sum(score_transition(a, b, weights) for a, b in old_trans)
-            delta_bal = tracker.delta_balance_penalty(
-                old_trans, new_trans, weights
-            )
-            delta = delta_div - lambda_balance * delta_bal
-
-            # Accept if improvement, or probabilistically while temperature is warm.
-            accept = delta > 0 or (
-                T > T_min and rng.random() < math.exp(delta / T)
-            )
-
-            found_new_best = False
-            if accept:
-                order[i], order[j] = order[j], order[i]
-                current_score += delta
-                # Update tracker: remove transitions that no longer exist, add new ones.
-                for ga, gb in old_trans:
-                    tracker.remove(ga, gb)
-                for ga, gb in new_trans:
-                    tracker.add(ga, gb)
-                if current_score > best_score + 1e-9:
-                    best_score = current_score
-                    best_order = list(order)
-                    stagnation_counter = 0
-                    found_new_best = True
-
-            if not found_new_best:
-                stagnation_counter += 1
-                if stagnation_counter >= stagnation_limit:
-                    break  # stagnated — trigger a fresh restart
-
-            T = max(T * alpha, T_min)
+        if improved_order is not None:
+            best_score = new_best_score
+            best_order = improved_order
 
     print(
         f"#   SA: {n_restarts} restart(s), {total_iters} total iteration(s)",
@@ -581,6 +627,123 @@ def build_row_groups(
         buckets[key].append(idx)
 
     return [buckets[k] for k in key_order], key_order
+
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_weights(weight_str: str, n_groups: int) -> list[float]:
+    """
+    Parse a comma-separated weight string into a validated list of floats.
+    Exits with an error if the format is invalid or the count mismatches.
+    """
+    try:
+        weights = [float(w) for w in weight_str.split(",")]
+    except ValueError:
+        sys.exit(
+            "Error: --weight must be comma-separated numbers (e.g. '1,2,1')."
+        )
+    if len(weights) != n_groups:
+        sys.exit(
+            f"Error: --weight has {len(weights)} value(s); "
+            f"expected {n_groups} (one per group)."
+        )
+    return weights
+
+
+def _parse_fix_sort(fix_sort_str: str, n_groups: int) -> list[int]:
+    """
+    Parse a comma-separated index string into a validated list of group indices.
+    Exits with an error if the format is invalid or any index is out of range.
+    """
+    try:
+        fix_indices = [int(x) for x in fix_sort_str.strip().split(",")]
+    except ValueError:
+        sys.exit(
+            "Error: --fix-sort must be comma-separated integers (e.g. '2' or '2,0')."
+        )
+    for fi in fix_indices:
+        if fi < 0 or fi >= n_groups:
+            sys.exit(
+                f"Error: --fix-sort index {fi} is out of range "
+                f"(groups are numbered 0–{n_groups - 1})."
+            )
+    return fix_indices
+
+
+def _optimize_row_groups(
+    groups: list[tuple[str, ...]],
+    weights: list[float],
+    row_groups: list[list[int]],
+    rg_keys: list[tuple[str, ...]],
+    unique_per_group: list[list[str]],
+    fix_indices: list[int],
+    seed: int,
+    max_iter_arg: Optional[int],
+) -> list[int]:
+    """
+    Run Simulated Annealing sequentially over each row_group and return the
+    concatenated final ordering of all item indices.
+
+    Each row_group's SA receives the accumulated TransitionTracker from all
+    previous row_groups as a frozen background, steering it away from
+    transition pairs that are already over-represented.
+    """
+    final_order: list[int] = []
+    prefix_last: Optional[int] = None
+    global_tracker = TransitionTracker(len(weights))
+    global_trans_count = 0
+
+    for k, rg_indices in enumerate(row_groups):
+        n_rg = len(rg_indices)
+        max_iter = (
+            max_iter_arg if max_iter_arg is not None else 50_000 * max(n_rg, 1)
+        )
+        # Each row_group gets a deterministic but distinct seed derived from the
+        # global seed so results are independent across groups yet fully reproducible.
+        seed_k = seed + k
+        rg_prefix_last = prefix_last  # capture before advancing
+
+        best_order, best_score = simulated_annealing(
+            rg_indices,
+            groups,
+            weights,
+            seed=seed_k,
+            max_iter=max_iter,
+            prefix_last=prefix_last,
+            prefix_tracker=global_tracker,
+            n_prefix_transitions=global_trans_count,
+        )
+
+        # Record this row_group's transitions so the next row_group's SA sees
+        # the full history.
+        if prefix_last is not None and best_order:
+            global_tracker.add(groups[prefix_last], groups[best_order[0]])
+            global_trans_count += 1
+        for m in range(len(best_order) - 1):
+            global_tracker.add(groups[best_order[m]], groups[best_order[m + 1]])
+        global_trans_count += max(len(best_order) - 1, 0)
+
+        print(
+            f"# Row_group [{k}] key={rg_keys[k]}  "
+            f"score={best_score:.4f}  size={n_rg}  max_iter={max_iter}",
+            file=sys.stderr,
+        )
+        print_transition_stats(
+            best_order,
+            groups,
+            unique_per_group,
+            rg_prefix_last,
+            f"Row_group [{k}] key={rg_keys[k]}",
+            skip_groups=fix_indices,
+        )
+
+        final_order.extend(best_order)
+        prefix_last = best_order[-1] if best_order else prefix_last
+
+    return final_order
 
 
 # ---------------------------------------------------------------------------
@@ -686,10 +849,7 @@ def main() -> None:
     groups = parse_groups(items)
     n_groups = len(groups[0])
 
-    # Print seed information to stderr for reproducibility.
     print(f"# Seed: {args.seed}", file=sys.stderr)
-
-    # Print group summary to stderr.
     unique_per_group = [
         unique_ordered([g[gi] for g in groups]) for gi in range(n_groups)
     ]
@@ -697,37 +857,17 @@ def main() -> None:
     for gi, u in enumerate(unique_per_group):
         print(f"#   Group {gi}: {u}", file=sys.stderr)
 
-    # ── Parse weights ──────────────────────────────────────────────────────
-    if args.weight is not None:
-        try:
-            weights = [float(w) for w in args.weight.split(",")]
-        except ValueError:
-            sys.exit(
-                "Error: --weight must be comma-separated numbers (e.g. '1,2,1')."
-            )
-        if len(weights) != n_groups:
-            sys.exit(
-                f"Error: --weight has {len(weights)} value(s); "
-                f"expected {n_groups} (one per group)."
-            )
-    else:
-        weights = [1.0] * n_groups
-
-    # ── Parse --fix-sort ───────────────────────────────────────────────────
-    fix_indices: list[int] = []
-    if args.fix_sort is not None:
-        try:
-            fix_indices = [int(x) for x in args.fix_sort.strip().split(",")]
-        except ValueError:
-            sys.exit(
-                "Error: --fix-sort must be comma-separated integers (e.g. '2' or '2,0')."
-            )
-        for fi in fix_indices:
-            if fi < 0 or fi >= n_groups:
-                sys.exit(
-                    f"Error: --fix-sort index {fi} is out of range "
-                    f"(groups are numbered 0–{n_groups - 1})."
-                )
+    # ── Parse weights & fix-sort ───────────────────────────────────────────
+    weights = (
+        _parse_weights(args.weight, n_groups)
+        if args.weight is not None
+        else [1.0] * n_groups
+    )
+    fix_indices = (
+        _parse_fix_sort(args.fix_sort, n_groups)
+        if args.fix_sort is not None
+        else []
+    )
 
     # ── Large-list warning ─────────────────────────────────────────────────
     if (
@@ -757,63 +897,16 @@ def main() -> None:
         rg_keys = [("all",)]
 
     # ── Simulated Annealing per row group ──────────────────────────────────
-    final_order: list[int] = []
-    prefix_last: Optional[int] = None
-    global_tracker = TransitionTracker(
-        len(weights)
-    )  # accumulates all fixed transitions
-    global_trans_count = 0  # number of transitions recorded in global_tracker
-
-    for k, rg_indices in enumerate(row_groups):
-        n_rg = len(rg_indices)
-        max_iter = (
-            args.max_iter
-            if args.max_iter is not None
-            else 50_000 * max(n_rg, 1)
-        )
-
-        # Each row_group gets a deterministic but distinct seed derived from the
-        # global seed so results are independent across groups yet fully reproducible.
-        seed_k = args.seed + k
-
-        rg_prefix_last = prefix_last  # capture before advancing
-
-        best_order, best_score = simulated_annealing(
-            rg_indices,
-            groups,
-            weights,
-            seed=seed_k,
-            max_iter=max_iter,
-            prefix_last=prefix_last,
-            prefix_tracker=global_tracker,
-            n_prefix_transitions=global_trans_count,
-        )
-
-        # Record this row_group's transitions into the global tracker so the
-        # next row_group's SA sees the full history.
-        if prefix_last is not None and best_order:
-            global_tracker.add(groups[prefix_last], groups[best_order[0]])
-            global_trans_count += 1
-        for m in range(len(best_order) - 1):
-            global_tracker.add(groups[best_order[m]], groups[best_order[m + 1]])
-        global_trans_count += max(len(best_order) - 1, 0)
-
-        print(
-            f"# Row_group [{k}] key={rg_keys[k]}  "
-            f"score={best_score:.4f}  size={n_rg}  max_iter={max_iter}",
-            file=sys.stderr,
-        )
-        print_transition_stats(
-            best_order,
-            groups,
-            unique_per_group,
-            rg_prefix_last,
-            f"Row_group [{k}] key={rg_keys[k]}",
-            skip_groups=fix_indices,
-        )
-
-        final_order.extend(best_order)
-        prefix_last = best_order[-1] if best_order else prefix_last
+    final_order = _optimize_row_groups(
+        groups,
+        weights,
+        row_groups,
+        rg_keys,
+        unique_per_group,
+        fix_indices,
+        args.seed,
+        args.max_iter,
+    )
 
     # ── Overall transition stats ───────────────────────────────────────────
     print_transition_stats(
