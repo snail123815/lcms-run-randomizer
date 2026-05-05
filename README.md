@@ -64,6 +64,7 @@ Diagnostics (group summaries, per-group transition statistics, scores) go to **s
 | `--max-iter INT` | `50000 × n` | Maximum SA iterations per sub-problem |
 | `--priority {carryover,time}` | `carryover` | Optimization priority: `carryover` maximizes Diversity (consecutive-condition transitions); `time` maximizes Spread (each value evenly distributed across run positions to reduce instrument-drift confounding) |
 | `--no-warn` | | Suppress the large-list warning |
+| `--plot` | | Print SA score-convergence plots to stderr (requires `pip install plotext`) |
 
 ### Typical workflow
 
@@ -206,13 +207,53 @@ The three quality metrics are:
 
 ---
 
+## Score-convergence plots (`--plot`)
+
+Add `--plot` to print SA score-convergence charts to stderr.  Requires:
+
+```
+pip install plotext
+```
+
+**≤ 5 restarts** — a single chart showing the mean score per bin across all iterations.
+
+**> 5 restarts** — two side-by-side charts:
+
+| Left — *restart 1* | Right — *all-restart max* |
+|---|---|
+| Score trace of the first SA restart, trimmed at the point the global peak is first reached (the long flat stagnation tail is hidden). | Running maximum score per bin across every restart, showing the best solution found as the full iteration budget is spent. |
+
+Example (19 restarts, 100 000 iterations):
+
+```
+# SA score: row_group [0] key=('Mannitol', 'Pellets')
+#             restart 1                 all-restart max
+#      ┌────────────────────────┐       ┌────────────────────────┐
+# 27.20┤        ············   │  27.20┤····················    │
+#      │       ·                │       │                        │
+# 25.94┤     ··                 │  27.17│                        │
+#      │     ·                  │       │                        │
+# 24.68┤                        │  27.13│                        │
+#      │   ··                   │       │                        │
+# 23.42┤ ··                     │  27.10│            ·   ·       │
+#      │·                       │       │                        │
+# 22.16┤·                       │  27.07│            ·   ·       │
+#      └┬────┬────┬────┬────────┘       └┬────┬──────────┬──────┘
+#       66  1670 3275 4880             1000 25500       99000
+# score       iteration             best score   iteration (all)
+```
+
+The left chart ends early because the score reached its peak at iteration ~220 and the remainder was flat stagnation.  The right chart shows that the optimum (27.20) was found in the very first restart and no subsequent restart improved on it.
+
+---
+
 ## Roadmap
 
 - [x] Check for weighted diversity effectiveness
 - [x] Add `--priority` flag with `SpreadTracker` for temporal-spread optimization
 - [x] Interpretable quality report (Diversity / Balance / Spread metrics) in stderr
+- [x] Plotting: SA score-convergence curves via `--plot` (requires `plotext`)
 - [ ] ~~Extract core functions into submodules (`scoring`, `io`, `annealing`)~~
-- [ ] Plotting: transition heatmaps, score convergence curves
 - [ ] Support for Excel / CSV input
 
 ---

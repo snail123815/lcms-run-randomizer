@@ -895,6 +895,7 @@ def _run_single_restart(
     lambda_time: float = 0.0,
     position_offset: int = 0,
     n_total: Optional[int] = None,
+    score_history: Optional[list[float]] = None,
 ) -> tuple[Optional[list[int]], float, int]:
     """
     Run one SA restart starting from *order* (modified in place).
@@ -919,6 +920,8 @@ def _run_single_restart(
     position_offset  Global run index of the first item in *order* (default 0).
     n_total          Total items across the full run for normalization;
                      defaults to len(*order*).
+    score_history    If provided, *current_score* is appended after every SA
+                     step (including stagnation-triggered early exits).
     """
     tracker = _build_restart_tracker(
         prefix_last, prefix_tracker, order, groups, len(weights)
@@ -1002,8 +1005,12 @@ def _run_single_restart(
         if not found_new_best:
             stagnation_counter += 1
             if stagnation_counter >= stagnation_limit:
+                if score_history is not None:
+                    score_history.append(current_score)
                 return best_order_found, current_best, iters_used  # stagnated
 
+        if score_history is not None:
+            score_history.append(current_score)
         T = max(T * alpha, T_min)
 
     return best_order_found, current_best, budget
@@ -1022,6 +1029,7 @@ def simulated_annealing(
     priority: str = "carryover",
     position_offset: int = 0,
     n_total: Optional[int] = None,
+    restart_histories: Optional[list[list[float]]] = None,
 ) -> tuple[list[int], float]:
     """
     Find a high-scoring ordering of *indices* using Simulated Annealing.
@@ -1050,6 +1058,8 @@ def simulated_annealing(
                          by _optimize_row_groups for each row_group).
     n_total              Total number of items across all row_groups (for spread
                          normalization).  Defaults to len(*indices*).
+    restart_histories    If provided, each restart's per-step scores are appended
+                         as a separate sub-list (one list per restart) for plotting.
 
     Returns
     -------
@@ -1086,6 +1096,9 @@ def simulated_annealing(
     while total_iters < max_iter:
         order = list(indices)
         rng.shuffle(order)
+        restart_hist: Optional[list[float]] = (
+            [] if restart_histories is not None else None
+        )
         improved_order, new_best_score, iters_used = _run_single_restart(
             rng,
             order,
@@ -1103,7 +1116,10 @@ def simulated_annealing(
             lambda_time=lambda_time,
             position_offset=position_offset,
             n_total=effective_n_total,
+            score_history=restart_hist,
         )
+        if restart_histories is not None and restart_hist:
+            restart_histories.append(restart_hist)
         total_iters += iters_used
         n_restarts += 1
         if improved_order is not None:
@@ -1115,6 +1131,241 @@ def simulated_annealing(
         file=sys.stderr,
     )
     return best_order, best_score
+
+
+# ---------------------------------------------------------------------------
+# Score-history plot
+# ---------------------------------------------------------------------------
+
+
+def _bins_from_history(
+    history: list[float], n_bins: int = 50
+) -> tuple[list[float], list[float]]:
+    """Bin *history* into *n_bins* equal-width windows, return (xs, mean_ys)."""
+    n = len(history)
+    bin_size = max(1, n // n_bins)
+    xs: list[float] = []
+    ys: list[float] = []
+    for b in range(n_bins):
+        start = b * bin_size
+        end = min(start + bin_size, n)
+        if start >= n:
+            break
+        chunk = history[start:end]
+        xs.append(start + len(chunk) / 2.0)
+        ys.append(sum(chunk) / len(chunk))
+    return xs, ys
+
+
+def _bins_max_from_histories(
+    histories: list[list[float]], n_bins: int = 50
+) -> tuple[list[float], list[float]]:
+    """Flatten *histories*, bin into *n_bins* equal-width windows, return (xs, max_ys)."""
+    flat = [v for h in histories for v in h]
+    n = len(flat)
+    if n == 0:
+        return [], []
+    bin_size = max(1, n // n_bins)
+    xs: list[float] = []
+    ys: list[float] = []
+    for b in range(n_bins):
+        start = b * bin_size
+        end = min(start + bin_size, n)
+        if start >= n:
+            break
+        chunk = flat[start:end]
+        xs.append(start + len(chunk) / 2.0)
+        ys.append(max(chunk))
+    return xs, ys
+
+
+def _trim_trailing_flat(history: list[float]) -> list[float]:
+    """
+    Return *history* with the trailing flat region removed.
+
+    Finds the first index where the score reaches its global peak, then
+    keeps that point plus a small buffer (10 % of the climb length, minimum
+    50 steps) so the plot shows the ascent but not the long idle tail.
+    """
+    if not history:
+        return history
+    peak = max(history)
+    peak_idx = next(
+        (i for i, v in enumerate(history) if v >= peak - 1e-9), len(history) - 1
+    )
+    buffer = max(50, peak_idx // 10)
+    return history[: peak_idx + buffer]
+
+
+def _make_ticks(
+    values: list[float], n: int = 5, integer: bool = False
+) -> tuple[list[float], list[str]]:
+    """Return *n* evenly-spaced tick positions and formatted labels over *values*."""
+    if not values:
+        return [], []
+    lo, hi = min(values), max(values)
+    if lo == hi:
+        lbl = str(int(round(lo))) if integer else f"{lo:.2f}"
+        return [lo], [lbl]
+    ticks = [lo + i * (hi - lo) / (n - 1) for i in range(n)]
+    if integer:
+        labels = [str(int(round(t))) for t in ticks]
+    else:
+        labels = [f"{t:.2f}" for t in ticks]
+    return ticks, labels
+
+
+def _plot_score_history(
+    history: list[float], label: str, n_bins: int = 50
+) -> None:
+    """
+    Print a text dot-plot of SA score progression to stderr.
+
+    Requires the ``plotext`` package (``pip install plotext``).
+    Bins *history* into *n_bins* equal-width windows, plots the mean score
+    per bin as a dot scatter on a 15 × 20 character canvas.
+    """
+    try:
+        import plotext as plt  # type: ignore[import]
+    except ImportError:
+        print(
+            "# [--plot] 'plotext' not installed; skipping plot "
+            "(pip install plotext)",
+            file=sys.stderr,
+        )
+        return
+
+    if len(history) < 2:
+        return
+
+    xs, ys = _bins_from_history(history, n_bins)
+
+    x_ticks, x_labels = _make_ticks(xs, integer=True)
+    y_ticks, y_labels = _make_ticks(ys, integer=False)
+
+    plt.clear_figure()
+    plt.clear_color()
+    plt.scatter(xs, ys)
+    plt.plotsize(52, 22)  # 50 data cols + 2 axis; 20 data rows + 2
+    plt.xticks(x_ticks, x_labels)
+    plt.yticks(y_ticks, y_labels)
+    plt.xlabel("iteration")
+    plt.ylabel("score")
+    raw = plt.build()
+    lines = raw.split("\n")
+    while lines and lines[0].strip() == "":
+        lines = lines[1:]
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    print(f"# SA score: {label}", file=sys.stderr)
+    print("\n".join("# " + ln for ln in lines), file=sys.stderr)
+
+
+def _build_plot_lines(
+    xs: list[float],
+    ys: list[float],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    width: int = 27,
+    height: int = 22,
+    x_integer: bool = True,
+) -> list[str]:
+    """
+    Build and return the lines of a single plotext scatter plot.
+
+    *width* and *height* are the total canvas sizes passed to plotsize
+    (data area = width - 2, height - 2).  X ticks are formatted as integers
+    when *x_integer* is True (default); Y ticks always use 2 decimal places.
+    Leading and trailing blank lines are stripped before returning.
+    """
+    import plotext as plt  # type: ignore[import]
+
+    x_ticks, x_labels = _make_ticks(xs, integer=x_integer)
+    y_ticks, y_labels = _make_ticks(ys, integer=False)
+
+    plt.clear_figure()
+    plt.clear_color()
+    plt.scatter(xs, ys)
+    plt.plotsize(width, height)
+    plt.xticks(x_ticks, x_labels)
+    plt.yticks(y_ticks, y_labels)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    raw = plt.build()
+    lines = raw.split("\n")
+    while lines and lines[0].strip() == "":
+        lines = lines[1:]
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    return lines
+
+
+def _plot_split_restarts(
+    histories: list[list[float]], label: str, n_bins: int = 50
+) -> None:
+    """
+    Print two side-by-side plots to stderr when there are many restarts.
+
+    Left  (25 data cols wide): score trace of the first restart (binned).
+    Right (25 data cols wide): best score achieved in each restart.
+
+    Each plot is built independently and then merged line-by-line to avoid
+    relying on plotext's subplots API, which behaves inconsistently across
+    versions.
+
+    Requires the ``plotext`` package (``pip install plotext``).
+    """
+    try:
+        import plotext as _plt  # noqa: F401 — just check availability
+    except ImportError:
+        print(
+            "# [--plot] 'plotext' not installed; skipping plot "
+            "(pip install plotext)",
+            file=sys.stderr,
+        )
+        return
+
+    if not histories:
+        return
+
+    # Left: first restart trace, trimmed to exclude the trailing flat region
+    first = _trim_trailing_flat(histories[0])
+    xs, ys = _bins_from_history(first, n_bins)
+    left_lines = _build_plot_lines(
+        xs,
+        ys,
+        xlabel="iteration",
+        ylabel="score",
+        title="restart 1 till peak",
+        width=27,
+        height=22,
+    )
+
+    # Right: max per bin across all restarts flattened
+    rx, ry = _bins_max_from_histories(histories, n_bins)
+    right_lines = _build_plot_lines(
+        rx,
+        ry,
+        xlabel="iteration (all)",
+        ylabel="best score",
+        title="all-restart max",
+        width=27,
+        height=22,
+    )
+
+    # Merge side by side with a 2-space gap
+    gap = "  "
+    n_rows = max(len(left_lines), len(right_lines))
+    left_w = max((len(l) for l in left_lines), default=0)
+    left_lines = [l.ljust(left_w) for l in left_lines]
+    left_lines += [" " * left_w] * (n_rows - len(left_lines))
+    right_lines += [""] * (n_rows - len(right_lines))
+    merged = [l + gap + r for l, r in zip(left_lines, right_lines)]
+
+    print(f"# SA score: {label}", file=sys.stderr)
+    print("\n".join("# " + ln for ln in merged), file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1207,6 +1458,7 @@ def _optimize_row_groups(
     seed: int,
     max_iter_arg: Optional[int],
     priority: str = "carryover",
+    plot: bool = False,
 ) -> list[int]:
     """
     Run Simulated Annealing sequentially over each row_group and return the
@@ -1238,6 +1490,7 @@ def _optimize_row_groups(
             f"size={n_rg}  max_iter={max_iter}",
             file=sys.stderr,
         )
+        rg_histories: Optional[list[list[float]]] = [] if plot else None
         best_order, best_score = simulated_annealing(
             rg_indices,
             groups,
@@ -1250,7 +1503,15 @@ def _optimize_row_groups(
             priority=priority,
             position_offset=len(final_order),
             n_total=len(groups),
+            restart_histories=rg_histories,
         )
+        if plot and rg_histories:
+            label = f"row_group [{k}] key={rg_keys[k]}"
+            if len(rg_histories) > 5:
+                _plot_split_restarts(rg_histories, label)
+            else:
+                flat = [s for h in rg_histories for s in h]
+                _plot_score_history(flat, label)
 
         # Record this row_group's transitions so the next row_group's SA sees
         # the full history.
@@ -1367,6 +1628,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Suppress the large-list (> 20 items) warning.",
     )
     p.add_argument(
+        "--plot",
+        action="store_true",
+        help=(
+            "Print a text dot-plot of the SA score progression to stderr "
+            "after each row_group (requires 'plotext': pip install plotext)."
+        ),
+    )
+    p.add_argument(
         "--priority",
         choices=["carryover", "time"],
         default="carryover",
@@ -1473,6 +1742,7 @@ def main() -> None:
         args.seed,
         args.max_iter,
         args.priority,
+        args.plot,
     )
 
     # ── Overall transition stats ───────────────────────────────────────────
