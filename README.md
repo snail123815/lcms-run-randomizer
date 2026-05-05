@@ -57,11 +57,12 @@ Diagnostics (group summaries, per-group transition statistics, scores) go to **s
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--input FILE` | `to_randomise.txt` | Input file path |
-| `--seed INT` | `42` | Random seed for full reproducibility |
+| `FILE` (positional) | `to_randomise.txt` | Input file path |
+| `--seed INT` | `42` | Random seed — change to get a different randomization |
 | `--fix-sort GROUPS` | *(none)* | Comma-separated group indices used to pre-partition the list into sub-problems before randomizing (e.g. `2` or `1,2`) |
 | `--weight WEIGHTS` | `1,1,...` | Comma-separated per-group weights; higher weight = that group contributes more to the score |
 | `--max-iter INT` | `50000 × n` | Maximum SA iterations per sub-problem |
+| `--priority {carryover,time}` | `carryover` | Optimization priority: `carryover` maximizes Diversity (consecutive-condition transitions); `time` maximizes Spread (each value evenly distributed across run positions to reduce instrument-drift confounding) |
 | `--no-warn` | | Suppress the large-list warning |
 
 ### Typical workflow
@@ -78,6 +79,9 @@ python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 > run_order.txt 2> 
 
 # Weight strain transitions twice as heavily as others (group 0)
 python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --weight 2,1,1,1 > run_order.txt
+
+# Prioritize even temporal spread (instrument-drift mitigation) over carryover reduction
+python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --priority time > run_order.txt
 ```
 
 ---
@@ -90,7 +94,8 @@ At each iteration the algorithm proposes a swap of two positions and evaluates
 the change in a combined score:
 
 ```
-combined = diversity_score  −  λ · balance_penalty
+combined = diversity_score  −  λ_bal  · balance_penalty
+                            +  λ_time · spread_bonus
 ```
 
 **`diversity_score`** — for each consecutive pair (A, B): sum of `weights[g]`
@@ -102,12 +107,18 @@ T_g\[a,b\] counts how many times value a was immediately followed by value b.
 Penalises over-represented directed transitions, driving all pairs toward equal
 frequency.
 
-**λ** — set automatically to `1 / (total transitions in sequence so far)`,
-keeping both terms on the same numerical scale as the sequence grows.
+**`spread_bonus`** — for each group g and unique value v: normalized position
+variance `4 · Var(positions of v) / n²`.  Rewards samples with the same
+condition value appearing spread evenly across the run, mitigating
+instrument-drift confounding.
 
-Both the diversity delta and the balance-penalty delta are computed in **O(1)**
-per swap proposal (only the ≤ 4 affected transitions need to be evaluated),
-making the algorithm fast even for large lists.
+**λ_bal / λ_time** — controlled by `--priority`:
+- `carryover` (default): `λ_bal = 1 / n_trans`; `λ_time = λ_bal × 10⁻⁴` — spread breaks ties only.
+- `time`: `λ_time = 1 / n_trans`; `λ_bal = λ_time × 10⁻⁴` — spread is the primary objective.
+
+All three deltas (diversity, balance, spread) are computed in **O(1)**
+per swap proposal (only the ≤ 4 affected transitions and 2 affected positions
+need to be evaluated), making the algorithm fast even for large lists.
 
 Temperature decays exponentially from `T_start = max(1, Σ weights)` to
 `T_min = 1e-4` over 80 % of `max_iter`, with stagnation-based early stopping.
@@ -128,6 +139,7 @@ full run sequence.
 ## Output example (stderr diagnostics)
 
 ```
+# ── Input ─────────────────────────────────────────────────────────────
 # Seed: 7
 # 64 items, 4 group(s):
 #   Group 0: ['Wt', 'FraA', 'FraB', 'SdeA']
@@ -137,23 +149,46 @@ full run sequence.
 # --fix-sort '2': 2 row_group(s):
 #   [0] key=('Cellular',)  (32 items)
 #   [1] key=('Extracellular',)  (32 items)
-# Row_group [0] key=('Cellular',)  score=65.87  size=32  max_iter=1600000
-# Row_group [0] key=('Cellular',)  (31 transition(s))
-#   (Group 2 omitted — fixed by --fix-sort)
-#   Group 0:
-#     Wt              -> FraA            :  3/31 =   9.7%
-#     ...
+#
+# ── Optimisation ──────────────────────────────────────────────────────────
+# Row_group [0] key=('Cellular',)  size=32  max_iter=1600000
+#   Transitions  (31 transition(s))
+#     (Group 2 omitted — fixed by --fix-sort)
+#     Group 0:
+#       Wt              -> FraA            :  3/31 =   9.7%
+#       ...
+#   Quality  (31 transition(s)):
+#     Diversity :  31.0 / 31.0  (100.0%)
+#     Balance   :  Group 0: 98.2%   Group 1: 97.5%   Group 3: 96.8%
+#     Spread    :  Group 0:  Wt=85%  FraA=87%  FraB=82%  SdeA=84%
+#
+# Row_group [1] key=('Extracellular',)  size=32  max_iter=1600000
+#   ...
+#
 # Overall  (63 transition(s))
 #   Group 0:
 #     Wt              -> FraA            :  6/63 =   9.5%
 #     ...
+# Overall quality  (63 transition(s)):
+#   Diversity :  61.0 / 62.0  (98.4%)
+#   Balance   :  Group 0: 97.8%   Group 1: 96.9%   Group 3: 95.4%
+#   Spread    :  Group 0:  Wt=88%  FraA=90%  FraB=85%  SdeA=86%
+#
+# ── Output: randomized sample list follows ────────────────────────────────
 ```
+
+The three quality metrics are:
+- **Diversity** — actual vs. theoretical-maximum diversity score (100 % = every consecutive pair differs in every non-fixed group).
+- **Balance** — Cauchy–Schwarz ratio of ideal to actual transition-count sum-of-squares (100 % = all directed A→B pairs equally frequent).
+- **Spread** — per-value mean-absolute-deviation quality (100 % = occurrences land exactly at ideal evenly-spaced positions).
 
 ---
 
 ## Roadmap
 
 - [x] Check for weighted diversity effectiveness
+- [x] Add `--priority` flag with `SpreadTracker` for temporal-spread optimization
+- [x] Interpretable quality report (Diversity / Balance / Spread metrics) in stderr
 - [ ] ~~Extract core functions into submodules (`scoring`, `io`, `annealing`)~~
 - [ ] Plotting: transition heatmaps, score convergence curves
 - [ ] Support for Excel / CSV input
