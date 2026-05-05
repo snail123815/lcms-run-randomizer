@@ -1276,9 +1276,7 @@ def _make_ticks(
     return ticks, labels
 
 
-def _plot_score_history(
-    history: list[float], label: str, n_bins: int = 50
-) -> None:
+def _plot_score_history(history: list[float], n_bins: int = 50) -> None:
     """
     Print a text dot-plot of SA score progression to stderr.
 
@@ -1364,7 +1362,7 @@ def _build_plot_lines(
 
 
 def _plot_split_restarts(
-    histories: list[list[float]], label: str, n_bins: int = 50
+    histories: list[list[float]], n_bins: int = 50
 ) -> None:
     """
     Print two side-by-side plots to stderr when there are many restarts.
@@ -1576,12 +1574,11 @@ def _optimize_row_groups(
             restart_histories=rg_histories,
         )
         if plot and rg_histories:
-            label = f"row_group [{k}] key={rg_keys[k]}"
             if len(rg_histories) > 5:
-                _plot_split_restarts(rg_histories, label)
+                _plot_split_restarts(rg_histories)
             else:
                 flat = [s for h in rg_histories for s in h]
-                _plot_score_history(flat, label)
+                _plot_score_history(flat)
 
         # Record this row_group's transitions so the next row_group's SA sees
         # the full history.
