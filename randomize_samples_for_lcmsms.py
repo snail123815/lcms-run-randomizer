@@ -275,6 +275,248 @@ def print_transition_stats(
 
 
 # ---------------------------------------------------------------------------
+# Quality metrics (interpretable output)
+# ---------------------------------------------------------------------------
+
+
+def _compute_diversity_quality(
+    pairs: list[tuple[int, int]],
+    groups: list[tuple[str, ...]],
+    weights: list[float],
+    unique_per_group: list[list[str]],
+    local_items: Optional[list[int]] = None,
+    prefix_last: Optional[int] = None,
+) -> tuple[float, float]:
+    """
+    Return (actual_diversity, max_possible_diversity).
+
+    When *local_items* is provided (a list of item indices in the current
+    row_group, not including any cross-boundary prefix), the theoretical max
+    is computed correctly for fixed-group contexts:
+
+    * Within-group transitions can only score for groups that vary among
+      *local_items*.  Groups fixed by --fix-sort have a single value in
+      *local_items* and cannot contribute.
+    * The optional cross-boundary transition (prefix_last → local_items[0]) is
+      treated separately: for each group g it can score if any item in
+      *local_items* differs from groups[prefix_last][g].
+
+    When *local_items* is None, the legacy behaviour is used: max_per_trans is
+    derived from *unique_per_group* (global) and applied uniformly to all
+    transitions.
+    """
+    actual = sum(
+        score_transition(groups[a], groups[b], weights) for a, b in pairs
+    )
+    if local_items is not None:
+        n_groups = len(groups[0]) if groups else 0
+        local_uniq = [
+            set(groups[idx][g] for idx in local_items) for g in range(n_groups)
+        ]
+        max_per_trans_within = sum(
+            w for g, w in enumerate(weights) if len(local_uniq[g]) > 1
+        )
+        n_cross = 1 if (prefix_last is not None and local_items) else 0
+        n_within = len(pairs) - n_cross
+        if prefix_last is not None and local_items:
+            max_per_trans_cross = sum(
+                w
+                for g, w in enumerate(weights)
+                if any(
+                    groups[idx][g] != groups[prefix_last][g]
+                    for idx in local_items
+                )
+            )
+            max_possible = n_within * max_per_trans_within + max_per_trans_cross
+        else:
+            max_possible = n_within * max_per_trans_within
+    else:
+        max_per_trans = sum(
+            w for g, w in enumerate(weights) if len(unique_per_group[g]) > 1
+        )
+        max_possible = len(pairs) * max_per_trans
+    return actual, max_possible
+
+
+def _compute_balance_quality(
+    pairs: list[tuple[int, int]],
+    groups: list[tuple[str, ...]],
+    unique_per_group: list[list[str]],
+    skip_groups: list[int],
+) -> list[Optional[tuple[float, float]]]:
+    """
+    Return a per-group list of (actual_sum_sq, ideal_sum_sq) for off-diagonal
+    transitions, or None when the group is skipped or has no off-diagonal pairs.
+
+    ideal_sum_sq is the Cauchy–Schwarz lower bound: the minimum achievable
+    sum-of-squares when T_g transitions are distributed as evenly as possible
+    over all m_g = k*(k-1) directed pairs.
+
+    quality (%) = 100 * ideal_sum_sq / actual_sum_sq  (100% = perfectly balanced).
+    """
+    result: list[Optional[tuple[float, float]]] = []
+    for g, uvals in enumerate(unique_per_group):
+        if g in skip_groups:
+            result.append(None)
+            continue
+        counts: dict[tuple[str, str], int] = {}
+        for idx_a, idx_b in pairs:
+            a, b = groups[idx_a][g], groups[idx_b][g]
+            if a != b:
+                key = (a, b)
+                counts[key] = counts.get(key, 0) + 1
+        T_g = sum(counts.values())
+        m_g = len(uvals) * (len(uvals) - 1)
+        if T_g == 0 or m_g == 0:
+            result.append(None)
+            continue
+        actual_sum_sq = float(sum(c * c for c in counts.values()))
+        q, r = divmod(T_g, m_g)
+        ideal_sum_sq = float((m_g - r) * q * q + r * (q + 1) * (q + 1))
+        result.append((actual_sum_sq, ideal_sum_sq))
+    return result
+
+
+def _compute_spread_quality(
+    order: list[int],
+    groups: list[tuple[str, ...]],
+    unique_per_group: list[list[str]],
+    skip_groups: list[int],
+    position_offset: int,
+    n_total: int,
+) -> list[dict[str, float]]:
+    """
+    Return a per-group list of {value: quality} where quality ∈ [0, 1].
+
+    Only values with c ≥ 2 occurrences are included.  quality = 1.0 means
+    the c occurrences are perfectly evenly spaced across the full run;
+    quality = 0.0 means they are maximally clustered.
+
+    The ideal reference positions are the centers of c equal windows:
+        p*_k = (2k + 1) * (n_total - 1) / (2c)   for k = 0 … c-1.
+
+    quality = max(0, 1 - MAD / ((n_total - 1) / 2))
+    where MAD is the mean absolute deviation of sorted actual positions from p*_k.
+    """
+    n_groups = len(groups[0]) if groups else 0
+    norm = (n_total - 1) / 2.0 if n_total > 1 else 1.0
+    result: list[dict[str, float]] = []
+    for g in range(n_groups):
+        gdict: dict[str, float] = {}
+        if g not in skip_groups:
+            pos_map: dict[str, list[float]] = {}
+            for local_pos, idx in enumerate(order):
+                v = groups[idx][g]
+                gp = float(position_offset + local_pos)
+                pos_map.setdefault(v, []).append(gp)
+            for v, positions in pos_map.items():
+                c = len(positions)
+                if c < 2:
+                    continue
+                positions.sort()
+                ideal = [
+                    (2 * k + 1) * (n_total - 1) / (2 * c) for k in range(c)
+                ]
+                mad = sum(abs(p - p_s) for p, p_s in zip(positions, ideal)) / c
+                gdict[v] = max(0.0, 1.0 - mad / norm)
+        result.append(gdict)
+    return result
+
+
+def print_quality_stats(
+    order: list[int],
+    groups: list[tuple[str, ...]],
+    unique_per_group: list[list[str]],
+    weights: list[float],
+    prefix_last: Optional[int],
+    label: str,
+    skip_groups: Optional[list[int]] = None,
+    position_offset: int = 0,
+    n_total: Optional[int] = None,
+) -> None:
+    """
+    Print interpretable quality statistics for *order* to stderr.
+
+    Three metrics are reported:
+
+    Diversity   Fraction of the theoretical maximum diversity score achieved
+                (100% = every consecutive pair differs in every condition group
+                that has more than one unique value).
+
+    Balance     For each group: ratio of the Cauchy–Schwarz ideal sum-of-squares
+                to the actual sum-of-squares of directed transition counts
+                (100% = all directed A→B pairs occur with equal frequency).
+
+    Spread      For each group and value with ≥ 2 occurrences: how evenly
+                those occurrences are distributed across the run
+                (100% = positions match ideal even-window centers exactly).
+
+    Groups in *skip_groups* are fixed by --fix-sort and are omitted from
+    balance and spread (their within-group transitions are trivially constant).
+    """
+    skip_groups = skip_groups or []
+    pairs: list[tuple[int, int]] = []
+    if prefix_last is not None and order:
+        pairs.append((prefix_last, order[0]))
+    for k in range(len(order) - 1):
+        pairs.append((order[k], order[k + 1]))
+    if not pairs:
+        return
+
+    effective_n_total = n_total if n_total is not None else len(order)
+    n_trans = len(pairs)
+
+    actual_div, max_div = _compute_diversity_quality(
+        pairs,
+        groups,
+        weights,
+        unique_per_group,
+        local_items=order,
+        prefix_last=prefix_last,
+    )
+    div_pct = 100.0 * actual_div / max_div if max_div > 0.0 else 100.0
+
+    bal_data = _compute_balance_quality(
+        pairs, groups, unique_per_group, skip_groups
+    )
+    spread_data = _compute_spread_quality(
+        order,
+        groups,
+        unique_per_group,
+        skip_groups,
+        position_offset,
+        effective_n_total,
+    )
+
+    print(f"# {label} quality  ({n_trans} transition(s)):", file=sys.stderr)
+    print(
+        f"#   Diversity :  {actual_div:.1f} / {max_div:.1f}  ({div_pct:.1f}%)",
+        file=sys.stderr,
+    )
+
+    bal_parts = []
+    for g, entry in enumerate(bal_data):
+        if g in skip_groups or entry is None:
+            continue
+        actual_sq, ideal_sq = entry
+        pct = 100.0 * ideal_sq / actual_sq if actual_sq > 0.0 else 100.0
+        bal_parts.append(f"Group {g}: {pct:.1f}%")
+    if bal_parts:
+        print(f"#   Balance   :  {'   '.join(bal_parts)}", file=sys.stderr)
+
+    spread_parts = []
+    for g, gdict in enumerate(spread_data):
+        if g in skip_groups or not gdict:
+            continue
+        uvals = unique_per_group[g]
+        val_strs = [f"{v}={100.0 * gdict[v]:.0f}%" for v in uvals if v in gdict]
+        if val_strs:
+            spread_parts.append(f"Group {g}:  {'  '.join(val_strs)}")
+    if spread_parts:
+        print(f"#   Spread    :  {'   '.join(spread_parts)}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Transition frequency tracker (for balance penalty)
 # ---------------------------------------------------------------------------
 
@@ -951,7 +1193,7 @@ def _optimize_row_groups(
 
         print(
             f"# Row_group [{k}] key={rg_keys[k]}  "
-            f"score={best_score:.4f}  size={n_rg}  max_iter={max_iter}",
+            f"size={n_rg}  max_iter={max_iter}",
             file=sys.stderr,
         )
         if len(row_groups) > 1:
@@ -962,6 +1204,17 @@ def _optimize_row_groups(
                 rg_prefix_last,
                 f"Row_group [{k}] key={rg_keys[k]}",
                 skip_groups=fix_indices,
+            )
+            print_quality_stats(
+                best_order,
+                groups,
+                unique_per_group,
+                weights,
+                rg_prefix_last,
+                f"Row_group [{k}] key={rg_keys[k]}",
+                skip_groups=fix_indices,
+                position_offset=len(final_order),
+                n_total=len(groups),
             )
 
         final_order.extend(best_order)
@@ -1155,6 +1408,17 @@ def main() -> None:
         prefix_last=None,
         label="Overall",
         skip_groups=fix_indices,
+    )
+    print_quality_stats(
+        final_order,
+        groups,
+        unique_per_group,
+        weights,
+        prefix_last=None,
+        label="Overall",
+        skip_groups=fix_indices,
+        position_offset=0,
+        n_total=len(items),
     )
 
     # ── Output ─────────────────────────────────────────────────────────────
