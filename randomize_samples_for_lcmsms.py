@@ -509,7 +509,7 @@ def print_quality_stats(
         effective_n_total,
     )
 
-    print(f"# {label} quality  ({n_trans} transition(s)):", file=sys.stderr)
+    print(f"# {label}  ({n_trans} transition(s)):", file=sys.stderr)
     print(
         f"#   Diversity :  {actual_div:.1f} / {max_div:.1f}  ({div_pct:.1f}%)",
         file=sys.stderr,
@@ -1189,6 +1189,13 @@ def _optimize_row_groups(
         seed_k = seed + k
         rg_prefix_last = prefix_last  # capture before advancing
 
+        if k > 0:
+            print("#", file=sys.stderr)
+        print(
+            f"# Row_group [{k}] key={rg_keys[k]}  "
+            f"size={n_rg}  max_iter={max_iter}",
+            file=sys.stderr,
+        )
         best_order, best_score = simulated_annealing(
             rg_indices,
             groups,
@@ -1212,18 +1219,13 @@ def _optimize_row_groups(
             global_tracker.add(groups[best_order[m]], groups[best_order[m + 1]])
         global_trans_count += max(len(best_order) - 1, 0)
 
-        print(
-            f"# Row_group [{k}] key={rg_keys[k]}  "
-            f"size={n_rg}  max_iter={max_iter}",
-            file=sys.stderr,
-        )
         if len(row_groups) > 1:
             print_transition_stats(
                 best_order,
                 groups,
                 unique_per_group,
                 rg_prefix_last,
-                f"Row_group [{k}] key={rg_keys[k]}",
+                "  Transitions",
                 skip_groups=fix_indices,
             )
             print_quality_stats(
@@ -1232,7 +1234,7 @@ def _optimize_row_groups(
                 unique_per_group,
                 weights,
                 rg_prefix_last,
-                f"Row_group [{k}] key={rg_keys[k]}",
+                "  Quality",
                 skip_groups=fix_indices,
                 position_offset=len(final_order),
                 n_total=len(groups),
@@ -1362,6 +1364,10 @@ def main() -> None:
     groups = parse_groups(items)
     n_groups = len(groups[0])
 
+    print(
+        "# ── Input ─────────────────────────────────────────────────────────────",
+        file=sys.stderr,
+    )
     print(f"# Seed: {args.seed}", file=sys.stderr)
     unique_per_group = [
         unique_ordered([g[gi] for g in groups]) for gi in range(n_groups)
@@ -1410,6 +1416,11 @@ def main() -> None:
         rg_keys = [("all",)]
 
     # ── Simulated Annealing per row group ──────────────────────────────────
+    print("#", file=sys.stderr)
+    print(
+        "# ── Optimisation ──────────────────────────────────────────────────────────",
+        file=sys.stderr,
+    )
     final_order = _optimize_row_groups(
         groups,
         weights,
@@ -1423,6 +1434,7 @@ def main() -> None:
     )
 
     # ── Overall transition stats ───────────────────────────────────────────
+    print("#", file=sys.stderr)
     print_transition_stats(
         final_order,
         groups,
@@ -1437,15 +1449,26 @@ def main() -> None:
         unique_per_group,
         weights,
         prefix_last=None,
-        label="Overall",
+        label="Overall quality",
         skip_groups=fix_indices,
         position_offset=0,
         n_total=len(items),
     )
 
     # ── Output ─────────────────────────────────────────────────────────────
-    for idx in final_order:
-        print(items[idx])
+    print("#", file=sys.stderr)
+    print(
+        "# ── Output: randomized sample list follows ────────────────────────────────",
+        file=sys.stderr,
+    )
+    rg_sizes = [len(rg) for rg in row_groups]
+    pos = 0
+    for i, sz in enumerate(rg_sizes):
+        if i > 0:
+            print()
+        for idx in final_order[pos : pos + sz]:
+            print(items[idx])
+        pos += sz
 
 
 if __name__ == "__main__":
