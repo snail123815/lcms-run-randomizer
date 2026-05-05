@@ -59,6 +59,27 @@ Combined score = diversity_score  -  lambda_bal  * balance_penalty
                     time: lambda_time = lambda_bal; lambda_bal *= 1e-4
                       Spread is the primary objective; balance is tie-breaker.
 
+Quality report (stderr)
+-----------------------
+After each row_group and for the whole run, three metrics are shown:
+
+  Diversity   actual / theoretical-max diversity score (%).
+              100 % = every consecutive pair differs in every condition group
+              that has more than one unique value within that row_group.
+              The theoretical maximum accounts for groups that are constant
+              within a row_group (e.g. fixed by --fix-sort); only the single
+              cross-boundary transition may score for those groups.
+
+  Balance     per-group ratio of the Cauchy–Schwarz ideal sum-of-squares to
+              the actual sum-of-squares of directed transition counts.
+              100 % = all directed A→B pairs occur with equal frequency.
+              Groups fixed by --fix-sort are omitted (trivially constant).
+
+  Spread      per-group, per-value mean-absolute-deviation quality (%).
+              100 % = the c occurrences of a value are positioned at the
+              centers of c equal windows across the full run.
+              Groups fixed by --fix-sort are omitted.
+
 Input / Output
 --------------
 Input : file specified via --input (default: 'to_randomise.txt' in the current
@@ -1308,11 +1329,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{carryover,time}",
         help=(
             "Optimization priority (default: carryover). "
-            "'carryover': minimize run-order carryover; temporal spread of "
-            "each condition is a secondary tie-breaker. "
-            "'time': maximize temporal spread of each condition across the run "
-            "to reduce instrument-drift confounding; transition balance is the "
-            "secondary tie-breaker."
+            "'carryover' (default): maximize Diversity (unique consecutive "
+            "condition transitions); Balance is the primary tie-breaker; "
+            "Spread breaks remaining ties. "
+            "'time': maximize Spread (each condition value evenly distributed "
+            "across the run to reduce instrument-drift confounding); "
+            "Diversity/Balance serve as tie-breakers."
         ),
     )
     return p
