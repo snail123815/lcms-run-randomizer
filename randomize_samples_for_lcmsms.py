@@ -13,8 +13,35 @@ value.  Both objectives enter the combined score as weighted terms; their
 relative importance is controlled by --priority.  In the default mode
 (carryover), the spread weight is 1e-4 x the carryover weight, so spread
 only influences decisions when the carryover delta is negligible.  With
---priority time the weights are swapped: spread dominates and carryover
-balance becomes the minor term.
+--priority time, Spread replaces Balance as the dominant secondary objective;
+Diversity remains the primary (unscaled) objective in both modes.
+
+Diversity:
+  For each consecutive pair (A, B): sum of weights[g] for all groups g where
+  A[g] != B[g].  Always the dominant (unscaled) term in the combined score.
+  Maximizing diversity ensures each unique condition value is followed by every
+  other value as often as possible, minimizing carryover bias.
+  Diversity is a local, per-transition reward: it only cares whether the two
+  items at each individual step differ, not how often any specific pair has
+  appeared before.
+
+Balance:
+  For each group g: sum_{a != b} T_g[a,b]^2, where T_g[a,b] counts how many
+  times value a was immediately followed by value b.  Penalizes over-represented
+  directed (a -> b) pairs.  In --priority carryover mode this is the dominant
+  secondary objective; in --priority time it has negligible weight.
+  Balance is a global, history-aware penalty: it looks at the cumulative
+  frequency of every directed pair across the whole run and pushes rare pairs
+  to appear more often.  Two runs can have identical Diversity scores yet very
+  different Balance scores — one may repeat A→B many times while never seeing
+  B→A, the other distributes all directed pairs equally.
+
+Spread:
+  For each group g and each unique value v: normalized position variance,
+  4 * Var(positions of v) / n_total^2.  Rewards each condition value appearing
+  at evenly spaced run positions, mitigating instrument-drift confounding.  In
+  --priority time mode this is the dominant secondary objective; in --priority
+  carryover it has negligible weight.
 
 Algorithm
 ---------
@@ -62,8 +89,8 @@ Combined score = diversity_score  -  lambda_bal  * balance_penalty
                     carryover (default): lambda_time = lambda_bal * 1e-4
                       Spread has negligible weight; carryover reduction dominates.
                     time: lambda_time = lambda_bal; lambda_bal *= 1e-4
-                      Spread is the primary objective; carryover balance has
-                      negligible weight.
+                      Spread is the primary secondary objective (after
+                      Diversity); carryover balance has negligible weight.
 
 Quality report (stderr)
 -----------------------
@@ -85,9 +112,13 @@ After each row_group and for the whole run, three metrics are shown:
               100 % = all directed A→B pairs occur with equal frequency.
               Groups fixed by --fix-sort are omitted (trivially constant).
 
-  Spread      per-group, per-value mean-absolute-deviation quality (%).
+  Spread      per-group, per-value mean-absolute-deviation (MAD) quality (%).
               100 % = the c occurrences of a value are positioned at the
               centers of c equal windows across the full run.
+              Note: the optimizer maximises a variance-based spread_bonus
+              (4·Var(positions)/n²); this MAD metric is correlated but not
+              equivalent — it measures a different quantity from what SA
+              directly optimised.
               Groups fixed by --fix-sort are omitted.
 
 Input / Output
@@ -458,6 +489,12 @@ def _compute_spread_quality(
 
     quality = max(0, 1 - MAD / ((n_total - 1) / 2))
     where MAD is the mean absolute deviation of sorted actual positions from p*_k.
+
+    Note: the SA optimiser (SpreadTracker) maximises a variance-based
+    spread_bonus: 4 * Var(positions of v) / n_total^2.  This MAD-based
+    quality metric is correlated with variance but not equivalent — the
+    reported Spread % does not directly measure how well the optimiser's
+    own objective was achieved.
     """
     n_groups = len(groups[0]) if groups else 0
     norm = (n_total - 1) / 2.0 if n_total > 1 else 1.0
@@ -1275,7 +1312,7 @@ def _plot_score_history(
         lines = lines[1:]
     while lines and lines[-1].strip() == "":
         lines.pop()
-    print(f"#   Plot of max of binned SA scores:", file=sys.stderr)
+    print("#   Plot of max of binned SA scores:", file=sys.stderr)
     print("\n".join("#     " + ln for ln in lines), file=sys.stderr)
 
 
@@ -1585,16 +1622,44 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="randomize_samples_for_lcmsms.py",
         description=(
-            "Randomize a sample list for LC-MS/MS, maximizing the diversity of\n"
-            "consecutive condition transitions so that each unique condition value\n"
-            "is followed by every other value with approximately equal frequency.\n\n"
+            "Randomize a sample list for LC-MS/MS, maximizing the *diversity* and *balance*\n"
+            "of consecutive condition transitions so that each unique condition value is\n"
+            "followed by every other value with approximately equal frequency. *Spread* \n"
+            "of different terms is also considered as a secondary objective by default.\n\n"
             "Input : positional input file (only the first whitespace-separated token\n"
             "         per line is used)\n"
             "Output: randomized list, one item per line, to stdout.\n"
             "Info  : diagnostic / progress output to stderr.\n\n"
             "Algorithm: Simulated Annealing with O(1) incremental score updates.\n"
-            "SA outperforms Monte Carlo random restarts by making directed\n"
-            "improvements and escaping local optima via temperature acceptance."
+            "SA outperforms Monte Carlo random restarts by making directed improvements and\n"
+            "escaping local optima via temperature acceptance.\n\n"
+            "\n"
+            "Diversity:\n"
+            "  For each consecutive pair (A, B): sum of weights[g] for all groups g where\n"
+            "  A[g] != B[g].  Always the dominant (unscaled) term in the combined score.\n"
+            "  Maximizing diversity ensures each unique condition value is followed by every\n"
+            "  other value as often as possible, minimizing carryover bias.\n"
+            "  Diversity is a local, per-transition reward: it only cares whether the two\n"
+            "  items at each individual step differ, not how often any specific pair has\n"
+            "  appeared before.\n"
+            "\n"
+            "Balance:\n"
+            "  For each group g: sum_{a != b} T_g[a,b]^2, where T_g[a,b] counts how many\n"
+            "  times value a was immediately followed by value b.  Penalizes over-represented\n"
+            "  directed (a -> b) pairs.  In --priority carryover mode this is the dominant\n"
+            "  secondary objective; in --priority time it has negligible weight.\n"
+            "  Balance is a global, history-aware penalty: it looks at the cumulative\n"
+            "  frequency of every directed pair across the whole run and pushes rare pairs\n"
+            "  to appear more often.  Two runs can have identical Diversity scores yet very\n"
+            "  different Balance scores — one may repeat A→B many times while never seeing\n"
+            "  B→A, the other distributes all directed pairs equally.\n"
+            "\n"
+            "Spread:\n"
+            "  For each group g and each unique value v: normalized position variance,\n"
+            "  4 * Var(positions of v) / n_total^2.  Rewards each condition value appearing\n"
+            "  at evenly spaced run positions, mitigating instrument-drift confounding.  In\n"
+            "  --priority time mode this is the dominant secondary objective; in --priority\n"
+            "  carryover it has negligible weight.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1666,11 +1731,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optimization priority (default: carryover). "
             "'carryover' (default): maximize Diversity (unique consecutive "
-            "condition transitions); Balance is the primary tie-breaker; "
-            "Spread breaks remaining ties. "
-            "'time': maximize Spread (each condition value evenly distributed "
-            "across the run to reduce instrument-drift confounding); "
-            "Diversity/Balance serve as tie-breakers."
+            "condition transitions); Balance is the dominant secondary "
+            "objective; Spread breaks remaining ties. "
+            "'time': Diversity remains the primary objective; Spread replaces "
+            "Balance as the dominant secondary objective (instrument-drift "
+            "mitigation); Balance has negligible weight."
         ),
     )
     return p

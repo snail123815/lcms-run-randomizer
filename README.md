@@ -16,11 +16,22 @@ In LC-MS/MS proteomics experiments, systematic run-order bias can confound quant
 
 Simplify the effort of generating a run order that minimizes carryover bias and instrument-drift confounding, while maximizing the diversity of condition transitions.
 
-Uses **Simulated Annealing (SA)** to find a run order where each directed pair (condition A → condition B) occurs as often as every other pair, for every condition dimension independently. Instrument-drift confounding is also addressed: the algorithm rewards even temporal distribution of each condition value so that drift affects all conditions equally. The relative priority between carryover reduction and drift mitigation is controlled by `--priority`.
+Uses **Simulated Annealing (SA)** to find a run order where repeats of the same condition in consecutive runs are minimized and each directed pair (condition A → condition B) occurs as often as every other pair, for every condition dimension independently. Instrument-drift confounding is also addressed: the algorithm rewards even temporal distribution of each condition value so that drift affects all conditions equally. The relative priority between carryover reduction and drift mitigation is controlled by `--priority`.
 
 Samples can be grouped by one or more fixed condition(s) using `--fix-sort` (e.g. by growth phase), so that the same balance is achieved **within each group** (e.g. within each fraction). The balance penalty is computed globally across the full sequence, so the algorithm steers each group away from over-represented transitions in previous groups, producing a globally balanced run order.
 
 > **Note:** If you need same-condition samples to stay together (e.g. to minimize carryover from other conditions for low-abundance precursors), use `--fix-sort` to partition by that condition rather than randomizing across it.
+
+## Major score components
+
+- Diversity:
+  For each consecutive pair (A, B): sum of weights[g] for all groups g where A[g] != B[g]. Always the dominant (unscaled) term in the combined score.  Maximizing diversity ensures each unique condition value is followed by every other value as often as possible, minimizing carryover bias.  Diversity is a local, per-transition reward: it only cares whether the two items at each individual step differ, not how often any specific pair has appeared before.
+
+- Balance:
+  For each group g: sum_{a != b} T_g[a,b]^2, where T_g[a,b] counts how many times value a was immediately followed by value b. Penalizes over-represented directed (a -> b) pairs. In `--priority carryover` mode this is the dominant secondary objective; in `--priority time` mode it has negligible weight.  Balance is a global, history-aware penalty: it looks at the cumulative frequency of every directed pair across the whole run and pushes rare pairs to appear more often.  Two runs can have identical Diversity scores yet very different Balance scores — one may repeat A→B many times while never seeing B→A, the other distributes all directed pairs equally.
+
+- Spread:
+  For each group g and each unique value v: normalized position variance, 4 * Var(positions of v) / n_total^2. Rewards each condition value appearing at evenly spaced run positions, mitigating instrument-drift confounding. In `--priority time` mode this is the dominant secondary objective; in default `--priority carryover` it has negligible weight.
 
 ---
 
@@ -66,7 +77,7 @@ Diagnostics (group summaries, per-group transition statistics, scores) go to **s
 | `--fix-sort GROUPS` | *(none)* | Comma-separated group indices used to pre-partition the list into sub-problems before randomizing (e.g. `2` or `1,2`) |
 | `--weight WEIGHTS` | `1,1,...` | Comma-separated per-group weights; higher weight = that group contributes more to the score |
 | `--max-iter INT` | `50000 × n` | Maximum SA iterations per sub-problem |
-| `--priority {carryover,time}` | `carryover` | Optimization priority: `carryover` maximizes Diversity (consecutive-condition transitions); `time` maximizes Spread (each value evenly distributed across run positions to reduce instrument-drift confounding) |
+| `--priority {carryover,time}` | `carryover` | Optimization priority: `carryover` maximizes Diversity (consecutive-condition transitions) as primary objective; Balance is the dominant secondary objective; Spread breaks remaining ties. `time`: Diversity remains the primary objective; Spread replaces Balance as the dominant secondary objective (instrument-drift mitigation); Balance has negligible weight |
 | `--no-warn` | | Suppress the large-list warning |
 | `--plot` | | Print SA score-convergence plots to stderr (requires `pip install plotext`) |
 
@@ -141,7 +152,7 @@ instrument-drift confounding.
 
 **λ_bal / λ_time** — controlled by `--priority`:
 - `carryover` (default): `λ_bal = 1 / n_trans`; `λ_time = λ_bal × 10⁻⁴` — spread has negligible weight; carryover reduction dominates.
-- `time`: `λ_time = 1 / n_trans`; `λ_bal = λ_time × 10⁻⁴` — spread is the primary objective; carryover balance has negligible weight.
+- `time`: `λ_time = 1 / n_trans`; `λ_bal = λ_time × 10⁻⁴` — Spread replaces Balance as the dominant secondary objective (after Diversity); carryover balance has negligible weight.
 
 All three deltas (diversity, balance, spread) are computed in **O(1)**
 per swap proposal (only the ≤ 4 affected transitions and 2 affected positions
@@ -207,7 +218,7 @@ full run sequence.
 The three quality metrics are:
 - **Diversity** — actual vs. theoretical-maximum diversity score (100 % = every consecutive pair differs in every non-fixed group).
 - **Balance** — Cauchy–Schwarz ratio of ideal to actual transition-count sum-of-squares (100 % = all directed A→B pairs equally frequent).
-- **Spread** — per-value mean-absolute-deviation quality (100 % = occurrences land exactly at ideal evenly-spaced positions).
+- **Spread** — per-value mean-absolute-deviation (MAD) quality (100 % = occurrences land exactly at ideal evenly-spaced window centers).  Note: the optimizer maximises a variance-based `spread_bonus` (`4·Var(positions)/n²`); this MAD metric is correlated but not equivalent — the reported percentage does not directly measure how well the optimizer's own objective was achieved.
 
 ---
 
