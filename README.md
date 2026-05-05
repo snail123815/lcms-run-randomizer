@@ -8,15 +8,19 @@ Randomize a sample list for LC-MS/MS runs, maximizing the diversity of consecuti
 
 In LC-MS/MS proteomics experiments, systematic run-order bias can confound quantitative results, especially for low-abundance proteins. Simply shuffling samples avoids block effects but does not guarantee that every condition-to-condition transition is represented equally.
 
+"Block what you can and randomize what you can't" - Box G.; Hunter J.; Hunter W.. Statistics for Experimenters: Design, Innovation, and Discovery, 2nd ed.; Wiley Series in Probability and Statistics; Wiley: Hoboken, NJ, 2005.
+
 ---
 
 ## Goal
 
-Uses **Simulated Annealing (SA)** to find a run order where:
+Simplify the effort of generating a run order that minimizes carryover bias and instrument-drift confounding, while maximizing the diversity of condition transitions.
 
-Across the full sequence — each directed pair (condition A → condition B) occurs as often as every other pair, for every condition dimension independently.
+Uses **Simulated Annealing (SA)** to find a run order where each directed pair (condition A → condition B) occurs as often as every other pair, for every condition dimension independently. Instrument-drift confounding is also addressed: the algorithm rewards even temporal distribution of each condition value so that drift affects all conditions equally. The relative priority between carryover reduction and drift mitigation is controlled by `--priority`.
 
-When grouping samples by one or more fixed condition(s) (e.g. growth phase), the same balance is achieved **within each group** (e.g. within each fraction), and the balance penalty is computed globally across the full sequence, so the algorithm steers each group away from over-represented transitions in previous groups, producing a globally balanced run order.
+Samples can be grouped by one or more fixed condition(s) using `--fix-sort` (e.g. by growth phase), so that the same balance is achieved **within each group** (e.g. within each fraction). The balance penalty is computed globally across the full sequence, so the algorithm steers each group away from over-represented transitions in previous groups, producing a globally balanced run order.
+
+> **Note:** If you need same-condition samples to stay together (e.g. to minimize carryover from other conditions for low-abundance precursors), use `--fix-sort` to partition by that condition rather than randomizing across it.
 
 ---
 
@@ -136,15 +140,15 @@ condition value appearing spread evenly across the run, mitigating
 instrument-drift confounding.
 
 **λ_bal / λ_time** — controlled by `--priority`:
-- `carryover` (default): `λ_bal = 1 / n_trans`; `λ_time = λ_bal × 10⁻⁴` — spread breaks ties only.
-- `time`: `λ_time = 1 / n_trans`; `λ_bal = λ_time × 10⁻⁴` — spread is the primary objective.
+- `carryover` (default): `λ_bal = 1 / n_trans`; `λ_time = λ_bal × 10⁻⁴` — spread has negligible weight; carryover reduction dominates.
+- `time`: `λ_time = 1 / n_trans`; `λ_bal = λ_time × 10⁻⁴` — spread is the primary objective; carryover balance has negligible weight.
 
 All three deltas (diversity, balance, spread) are computed in **O(1)**
 per swap proposal (only the ≤ 4 affected transitions and 2 affected positions
 need to be evaluated), making the algorithm fast even for large lists.
 
 Temperature decays exponentially from `T_start = max(1, Σ weights)` to
-`T_min = 1e-4` over 80 % of `max_iter`, with stagnation-based early stopping.
+`T_min = 1e-4` over 80 % of the per-restart iteration budget, with stagnation-based early stopping.
 
 ### `--fix-sort` and global transition history
 

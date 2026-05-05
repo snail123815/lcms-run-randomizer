@@ -7,9 +7,14 @@ consecutive condition transitions so that each unique condition value is
 followed by every other value with approximately equal frequency.
 
 Randomization is meant to reduce the impact of carryover by mixing different
-conditions in consecutive runs. Time-related confounders (e.g. instrument drift)
-is not a consideration here, but will benefit indirectly from the more even
-distribution of transitions.
+conditions in consecutive runs.  Instrument-drift confounding is also addressed
+via a spread bonus that rewards even temporal distribution of each condition
+value.  Both objectives enter the combined score as weighted terms; their
+relative importance is controlled by --priority.  In the default mode
+(carryover), the spread weight is 1e-4 x the carryover weight, so spread
+only influences decisions when the carryover delta is negligible.  With
+--priority time the weights are swapped: spread dominates and carryover
+balance becomes the minor term.
 
 Algorithm
 ---------
@@ -55,9 +60,10 @@ Combined score = diversity_score  -  lambda_bal  * balance_penalty
 
   lambda_time       Controlled by --priority:
                     carryover (default): lambda_time = lambda_bal * 1e-4
-                      Spread breaks ties only; carryover reduction dominates.
+                      Spread has negligible weight; carryover reduction dominates.
                     time: lambda_time = lambda_bal; lambda_bal *= 1e-4
-                      Spread is the primary objective; balance is tie-breaker.
+                      Spread is the primary objective; carryover balance has
+                      negligible weight.
 
 Quality report (stderr)
 -----------------------
@@ -1050,9 +1056,10 @@ def simulated_annealing(
     prefix_tracker       TransitionTracker pre-loaded with prefix transitions.
     n_prefix_transitions Transitions already in *prefix_tracker*.
     T_min                Temperature floor; below this only improvements accepted.
-    priority             'carryover' (default): spread is a secondary tie-breaker.
-                         'time': spread is the primary objective; balance is the
-                         secondary tie-breaker.
+    priority             'carryover' (default): spread weight is 1e-4× the balance
+                         weight; spread has negligible influence on decisions.
+                         'time': spread weight equals the base weight; balance
+                         weight is reduced to 1e-4× the spread weight.
     position_offset      Global run index of the first item in *indices*
                          (0 when not using --fix-sort; supplied automatically
                          by _optimize_row_groups for each row_group).
