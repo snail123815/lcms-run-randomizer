@@ -67,6 +67,8 @@ Diagnostics (group summaries, per-group transition statistics, scores) go to **s
 
 ### Typical workflow
 
+**bash / zsh**
+
 ```bash
 # Simple randomization (≤ 20 samples)
 python randomize_samples_for_lcmsms.py --seed 7 > run_order.txt
@@ -82,6 +84,26 @@ python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --weight 2,1,1,1 > 
 
 # Prioritize even temporal spread (instrument-drift mitigation) over carryover reduction
 python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --priority time > run_order.txt
+```
+
+**PowerShell**
+
+```powershell
+# Simple randomization (≤ 20 samples)
+python randomize_samples_for_lcmsms.py --seed 7 | Set-Content run_order.txt
+
+# Large list: fix group 2 (fraction) to create sub-problems, then randomize within each
+python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 | Set-Content run_order.txt
+
+# Redirect diagnostics to a log file
+# PowerShell merges stderr into the success stream with *>&1, so split them first
+python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 2>run_order.log | Set-Content run_order.txt
+
+# Weight strain transitions twice as heavily as others (group 0)
+python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --weight 2,1,1,1 | Set-Content run_order.txt
+
+# Prioritize even temporal spread (instrument-drift mitigation) over carryover reduction
+python randomize_samples_for_lcmsms.py --fix-sort 2 --seed 7 --priority time | Set-Content run_order.txt
 ```
 
 ---
