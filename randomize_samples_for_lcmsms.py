@@ -1125,7 +1125,14 @@ def simulated_annealing(
         if improved_order is not None:
             best_score = new_best_score
             best_order = improved_order
+        if sys.stderr.isatty():
+            sys.stderr.write(
+                f"\r#   restart {n_restarts}, iter {total_iters}/{max_iter} ..."
+            )
+            sys.stderr.flush()
 
+    if sys.stderr.isatty():
+        sys.stderr.write("\r")
     print(
         f"#   SA: {n_restarts} restart(s), {total_iters} total iteration(s)",
         file=sys.stderr,
@@ -1343,12 +1350,13 @@ def _plot_split_restarts(
         height=22,
     )
 
-    # Right: max per bin across all restarts flattened
-    rx, ry = _bins_max_from_histories(histories, n_bins)
+    # Right: best score per restart (x = restart number)
+    rx = [float(i) for i in range(1, len(histories) + 1)]
+    ry = [max(h) for h in histories]
     right_lines = _build_plot_lines(
         rx,
         ry,
-        xlabel="iteration (all)",
+        xlabel="restart",
         ylabel="best score",
         title="all-restart max",
         width=27,

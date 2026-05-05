@@ -223,24 +223,33 @@ pip install plotext
 |---|---|
 | Score trace of the first SA restart, trimmed at the point the global peak is first reached (the long flat stagnation tail is hidden). | Running maximum score per bin across every restart, showing the best solution found as the full iteration budget is spent. |
 
-Example (19 restarts, 100 000 iterations):
+Example:
 
 ```
-# SA score: row_group [0] key=('Mannitol', 'Pellets')
-#             restart 1                 all-restart max
-#      ┌────────────────────────┐       ┌────────────────────────┐
-# 27.20┤        ············   │  27.20┤····················    │
-#      │       ·                │       │                        │
-# 25.94┤     ··                 │  27.17│                        │
-#      │     ·                  │       │                        │
-# 24.68┤                        │  27.13│                        │
-#      │   ··                   │       │                        │
-# 23.42┤ ··                     │  27.10│            ·   ·       │
-#      │·                       │       │                        │
-# 22.16┤·                       │  27.07│            ·   ·       │
-#      └┬────┬────┬────┬────────┘       └┬────┬──────────┬──────┘
-#       66  1670 3275 4880             1000 25500       99000
-# score       iteration             best score   iteration (all)
+#   SA: 14 restart(s), 80000 total iteration(s)
+# SA score: row_group [1] key=('Galacturonic-acid', 'Pellets')
+#        restart 1 till peak            all-restart max
+#      ┌────────────────────┐       ┌────────────────────┐
+# 27.61┤           •  ••••••│  27.61┤            •       │
+#      │          •••••     │       │                    │
+#      │          •         │       │   •                │
+#      │        •   •       │       │ •       ••         │
+# 26.34┤        ••          │  27.61┤•              •    │
+#      │       • •          │       │    •             • │
+#      │         •          │       │       •           •│
+#      │     •              │       │                •   │
+# 25.07┤    • •             │  27.61┤                    │
+#      │     • •            │       │                    │
+#      │                    │       │                    │
+#      │   •                │       │                    │
+# 23.80┤ •     •            │  27.61┤             •      │
+#      │  • ••              │       │                    │
+#      │• •                 │       │                    │
+#      │••                  │       │                    │
+# 22.52┤  ••                │  27.61┤      •             │
+#      └┬────┬────┬────────┬┘       └┬────┬────┬───┬────┬┘
+#      40  1007 1975    3910         1    4    8  11   14
+# score       iteration        best score   restart
 ```
 
 The left chart ends early because the score reached its peak at iteration ~220 and the remainder was flat stagnation.  The right chart shows that the optimum (27.20) was found in the very first restart and no subsequent restart improved on it.
