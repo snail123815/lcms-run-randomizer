@@ -1,4 +1,4 @@
-# lcms-run-randomizer
+# lcms-run-randomizer  v1.1
 
 Randomize a sample list for LC-MS/MS runs, maximizing the diversity of consecutive condition transitions so that each unique condition value is followed by every other value with **approximately equal frequency**.
 
@@ -280,7 +280,7 @@ The left chart ends early because the best restart's score reached its peak quic
 - [x] Interpretable quality report (Diversity / Balance / Spread metrics) in stderr
 - [x] Plotting: SA score-convergence curves via `--plot` (requires `plotext`)
 - [ ] ~~Extract core functions into submodules (`scoring`, `io`, `annealing`)~~
-- [ ] Support for Excel / CSV input
+- [ ] ~~Support for Excel / CSV input~~
 
 ---
 

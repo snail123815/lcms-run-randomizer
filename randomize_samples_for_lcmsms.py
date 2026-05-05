@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-randomize_samples_for_lcmsms.py
+randomize_samples_for_lcmsms.py  v1.1
 
 Randomize a sample list for LC-MS/MS runs, maximizing the diversity of
 consecutive condition transitions so that each unique condition value is
@@ -142,6 +142,8 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Constants and config
 # ---------------------------------------------------------------------------
+
+__version__ = "1.1"
 
 LARGE_LIST_THRESHOLD = 20
 
@@ -1665,6 +1667,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  carryover it has negligible weight.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     p.add_argument(
         "--fix-sort",
