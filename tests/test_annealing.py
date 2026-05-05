@@ -271,3 +271,53 @@ class TestSimulatedAnnealing:
         # Both should be valid permutations of indices
         assert sorted(order_no_prefix) == indices
         assert sorted(order_prefix) == indices
+
+    def test_carryover_priority_is_default(self):
+        # Explicit priority="carryover" must give the same result as the default.
+        indices = list(range(6))
+        r_default, s_default = simulated_annealing(
+            indices, self.GROUPS_SMALL, self.WEIGHTS, seed=5, max_iter=5_000
+        )
+        r_explicit, s_explicit = simulated_annealing(
+            indices,
+            self.GROUPS_SMALL,
+            self.WEIGHTS,
+            seed=5,
+            max_iter=5_000,
+            priority="carryover",
+        )
+        assert r_default == r_explicit
+        assert s_default == pytest.approx(s_explicit)
+
+    def test_time_priority_output_is_permutation(self):
+        indices = list(range(6))
+        order, _ = simulated_annealing(
+            indices,
+            self.GROUPS_SMALL,
+            self.WEIGHTS,
+            seed=3,
+            max_iter=5_000,
+            priority="time",
+        )
+        assert sorted(order) == indices
+
+    def test_time_priority_deterministic(self):
+        indices = list(range(6))
+        r1, s1 = simulated_annealing(
+            indices,
+            self.GROUPS_SMALL,
+            self.WEIGHTS,
+            seed=11,
+            max_iter=5_000,
+            priority="time",
+        )
+        r2, s2 = simulated_annealing(
+            indices,
+            self.GROUPS_SMALL,
+            self.WEIGHTS,
+            seed=11,
+            max_iter=5_000,
+            priority="time",
+        )
+        assert r1 == r2
+        assert s1 == pytest.approx(s2)

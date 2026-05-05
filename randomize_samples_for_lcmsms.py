@@ -6,6 +6,11 @@ Randomize a sample list for LC-MS/MS runs, maximizing the diversity of
 consecutive condition transitions so that each unique condition value is
 followed by every other value with approximately equal frequency.
 
+Randomization is meant to reduce the impact of carryover by mixing different
+conditions in consecutive runs. Time-related confounders (e.g. instrument drift)
+is not a consideration here, but will benefit indirectly from the more even
+distribution of transitions.
+
 Algorithm
 ---------
 Simulated Annealing (SA) with O(1) incremental score updates per swap proposal.
@@ -26,7 +31,8 @@ distribution of directed transitions across the full run sequence.
 
 Score
 -----
-Combined score = diversity_score - lambda * balance_penalty  (higher is better).
+Combined score = diversity_score  -  lambda_bal  * balance_penalty
+                                  +  lambda_time * spread_bonus   (higher is better).
 
   diversity_score   For each consecutive pair (A, B): sum of weights[g] for
                     all groups g where A[g] != B[g].  Rewards items that
@@ -38,11 +44,20 @@ Combined score = diversity_score - lambda * balance_penalty  (higher is better).
                     specific (a -> b) pairs, pushing all directed transitions
                     toward equal frequency.
 
-  lambda            Set automatically to 1 / (n_prefix_transitions +
-                    n_cross_boundary + row_group_size - 1), i.e. the total
-                    number of transitions in the full sequence up to and
-                    including the current row_group.  This keeps both terms
-                    on the same numerical scale as the sequence grows.
+  spread_bonus      For each group g and each unique value v in g: normalized
+                    position variance, 4 * Var(positions of v) / n_total^2.
+                    Rewards items with the same condition value appearing spread
+                    evenly across the run, mitigating instrument-drift confounding.
+
+  lambda_bal        Set automatically to 1 / (n_prefix_transitions +
+                    n_cross_boundary + row_group_size - 1).  Keeps diversity
+                    and balance on the same numerical scale.
+
+  lambda_time       Controlled by --priority:
+                    carryover (default): lambda_time = lambda_bal * 1e-4
+                      Spread breaks ties only; carryover reduction dominates.
+                    time: lambda_time = lambda_bal; lambda_bal *= 1e-4
+                      Spread is the primary objective; balance is tie-breaker.
 
 Input / Output
 --------------
@@ -355,6 +370,155 @@ class TransitionTracker:
 
 
 # ---------------------------------------------------------------------------
+# Position spread tracker (for spread bonus)
+# ---------------------------------------------------------------------------
+
+
+class SpreadTracker:
+    """
+    Tracks per-(group, value) position statistics to compute the spread_bonus:
+    how evenly each condition value is distributed across the run positions.
+
+    For each group g and unique value v, stores the sum and sum-of-squares of
+    global run positions (position_offset + local_pos) where value v appears.
+    The spread_score is the weighted, normalized sum of position variances:
+
+        4 * Var(positions) / n_total^2
+
+    (= 0.0 if count ≤ 1; maximum ≈ 1 per group-value pair.)
+
+    All updates (delta_spread_score, apply_swap) are O(n_groups).
+    """
+
+    def __init__(
+        self, n_groups: int, position_offset: int, n_total: int
+    ) -> None:
+        self.n_groups = n_groups
+        self.position_offset = position_offset
+        self.n_total = n_total
+        self._norm = 4.0 / (n_total * n_total) if n_total > 1 else 0.0
+        # sum_p[g][v]  = sum of global positions for value v in group g
+        self.sum_p: list[dict[str, float]] = [{} for _ in range(n_groups)]
+        # sum_p2[g][v] = sum of (global position)^2 for value v in group g
+        self.sum_p2: list[dict[str, float]] = [{} for _ in range(n_groups)]
+        # count[g][v]  = number of items with value v in group g
+        self.count: list[dict[str, int]] = [{} for _ in range(n_groups)]
+
+    @classmethod
+    def from_order(
+        cls,
+        order: list[int],
+        groups: list[tuple[str, ...]],
+        n_groups: int,
+        position_offset: int,
+        n_total: int,
+    ) -> "SpreadTracker":
+        """Build a SpreadTracker from an existing ordering."""
+        st = cls(n_groups, position_offset, n_total)
+        for local_pos, idx in enumerate(order):
+            gp = float(position_offset + local_pos)
+            for g in range(n_groups):
+                v = groups[idx][g]
+                st.sum_p[g][v] = st.sum_p[g].get(v, 0.0) + gp
+                st.sum_p2[g][v] = st.sum_p2[g].get(v, 0.0) + gp * gp
+                st.count[g][v] = st.count[g].get(v, 0) + 1
+        return st
+
+    def _var(self, g: int, v: str) -> float:
+        """Un-normalized variance of global positions for value v in group g."""
+        c = self.count[g].get(v, 0)
+        if c <= 1:
+            return 0.0
+        sp = self.sum_p[g][v]
+        sp2 = self.sum_p2[g][v]
+        mean = sp / c
+        return sp2 / c - mean * mean
+
+    def spread_score(self, weights: list[float]) -> float:
+        """
+        Weighted, normalized sum of position variances (higher = more spread).
+        Each group-value pair contributes w_g * 4 * Var / n_total^2.
+        Values with count ≤ 1 contribute zero.
+        """
+        total = 0.0
+        for g, w in enumerate(weights):
+            if w == 0.0:
+                continue
+            for v in self.count[g]:
+                total += w * self._norm * self._var(g, v)
+        return total
+
+    def delta_spread_score(
+        self,
+        i: int,
+        j: int,
+        order: list[int],
+        groups: list[tuple[str, ...]],
+        weights: list[float],
+    ) -> float:
+        """
+        O(n_groups) change in spread_score from swapping positions i and j,
+        without modifying stored state.  Must be called before applying the swap.
+        """
+        p_i = float(self.position_offset + i)
+        p_j = float(self.position_offset + j)
+        delta = 0.0
+        for g, w in enumerate(weights):
+            if w == 0.0:
+                continue
+            va = groups[order[i]][g]
+            vb = groups[order[j]][g]
+            if va == vb:
+                continue
+            # va moves from p_i → p_j
+            c_a = self.count[g].get(va, 0)
+            if c_a >= 2:
+                sp_a = self.sum_p[g][va]
+                sp2_a = self.sum_p2[g][va]
+                new_sp_a = sp_a - p_i + p_j
+                new_sp2_a = sp2_a - p_i * p_i + p_j * p_j
+                old_var_a = sp2_a / c_a - (sp_a / c_a) ** 2
+                new_var_a = new_sp2_a / c_a - (new_sp_a / c_a) ** 2
+                delta += w * self._norm * (new_var_a - old_var_a)
+            # vb moves from p_j → p_i
+            c_b = self.count[g].get(vb, 0)
+            if c_b >= 2:
+                sp_b = self.sum_p[g][vb]
+                sp2_b = self.sum_p2[g][vb]
+                new_sp_b = sp_b - p_j + p_i
+                new_sp2_b = sp2_b - p_j * p_j + p_i * p_i
+                old_var_b = sp2_b / c_b - (sp_b / c_b) ** 2
+                new_var_b = new_sp2_b / c_b - (new_sp_b / c_b) ** 2
+                delta += w * self._norm * (new_var_b - old_var_b)
+        return delta
+
+    def apply_swap(
+        self,
+        i: int,
+        j: int,
+        order: list[int],
+        groups: list[tuple[str, ...]],
+    ) -> None:
+        """
+        Update tracked sums to reflect swapping positions i and j.
+        Must be called BEFORE modifying order[i] and order[j].
+        """
+        p_i = float(self.position_offset + i)
+        p_j = float(self.position_offset + j)
+        for g in range(self.n_groups):
+            va = groups[order[i]][g]
+            vb = groups[order[j]][g]
+            if va == vb:
+                continue
+            # va moves from p_i to p_j
+            self.sum_p[g][va] = self.sum_p[g][va] - p_i + p_j
+            self.sum_p2[g][va] = self.sum_p2[g][va] - p_i * p_i + p_j * p_j
+            # vb moves from p_j to p_i
+            self.sum_p[g][vb] = self.sum_p[g][vb] - p_j + p_i
+            self.sum_p2[g][vb] = self.sum_p2[g][vb] - p_j * p_j + p_i * p_i
+
+
+# ---------------------------------------------------------------------------
 # Simulated Annealing
 # ---------------------------------------------------------------------------
 
@@ -423,6 +587,9 @@ def _run_single_restart(
     stagnation_limit: int,
     budget: int,
     global_best_score: float,
+    lambda_time: float = 0.0,
+    position_offset: int = 0,
+    n_total: Optional[int] = None,
 ) -> tuple[Optional[list[int]], float, int]:
     """
     Run one SA restart starting from *order* (modified in place).
@@ -439,13 +606,35 @@ def _run_single_restart(
     new_best_score           Highest score seen; equals *global_best_score* if
                              no improvement was found.
     iters_used               SA steps executed in this restart.
+
+    Additional keyword arguments
+    ----------------------------
+    lambda_time      Scaling factor for the spread_bonus.  0.0 (default)
+                     disables spread tracking entirely.
+    position_offset  Global run index of the first item in *order* (default 0).
+    n_total          Total items across the full run for normalization;
+                     defaults to len(*order*).
     """
     tracker = _build_restart_tracker(
         prefix_last, prefix_tracker, order, groups, len(weights)
     )
+    effective_n_total = n_total if n_total is not None else len(order)
+    spread_tracker = (
+        SpreadTracker.from_order(
+            order, groups, len(weights), position_offset, effective_n_total
+        )
+        if lambda_time != 0.0
+        else None
+    )
     diversity = score_sequence(order, groups, weights, prefix_last)
-    current_score = diversity - lambda_balance * tracker.balance_penalty(
-        weights
+    current_score = (
+        diversity
+        - lambda_balance * tracker.balance_penalty(weights)
+        + (
+            lambda_time * spread_tracker.spread_score(weights)
+            if spread_tracker is not None
+            else 0.0
+        )
     )
 
     current_best = global_best_score
@@ -477,13 +666,22 @@ def _run_single_restart(
             score_transition(a, b, weights) for a, b in new_trans
         ) - sum(score_transition(a, b, weights) for a, b in old_trans)
         delta_bal = tracker.delta_balance_penalty(old_trans, new_trans, weights)
-        delta = delta_div - lambda_balance * delta_bal
+        delta_spread = (
+            spread_tracker.delta_spread_score(i, j, order, groups, weights)
+            if spread_tracker is not None
+            else 0.0
+        )
+        delta = (
+            delta_div - lambda_balance * delta_bal + lambda_time * delta_spread
+        )
 
         # Accept if improvement, or probabilistically while temperature is warm.
         accept = delta > 0 or (T > T_min and rng.random() < math.exp(delta / T))
 
         found_new_best = False
         if accept:
+            if spread_tracker is not None:
+                spread_tracker.apply_swap(i, j, order, groups)
             order[i], order[j] = order[j], order[i]
             current_score += delta
             for ga, gb in old_trans:
@@ -516,11 +714,15 @@ def simulated_annealing(
     prefix_tracker: Optional["TransitionTracker"] = None,
     n_prefix_transitions: int = 0,
     T_min: float = 1e-4,
+    priority: str = "carryover",
+    position_offset: int = 0,
+    n_total: Optional[int] = None,
 ) -> tuple[list[int], float]:
     """
     Find a high-scoring ordering of *indices* using Simulated Annealing.
 
-    Optimises:  diversity_score  -  lambda * balance_penalty  (higher = better).
+    Optimises:  diversity_score  -  lambda_bal  * balance_penalty
+                                 +  lambda_time * spread_bonus    (higher = better).
     Restarts from a fresh random ordering whenever stagnation is detected;
     the global *max_iter* budget is shared across all restarts.
 
@@ -535,6 +737,14 @@ def simulated_annealing(
     prefix_tracker       TransitionTracker pre-loaded with prefix transitions.
     n_prefix_transitions Transitions already in *prefix_tracker*.
     T_min                Temperature floor; below this only improvements accepted.
+    priority             'carryover' (default): spread is a secondary tie-breaker.
+                         'time': spread is the primary objective; balance is the
+                         secondary tie-breaker.
+    position_offset      Global run index of the first item in *indices*
+                         (0 when not using --fix-sort; supplied automatically
+                         by _optimize_row_groups for each row_group).
+    n_total              Total number of items across all row_groups (for spread
+                         normalization).  Defaults to len(*indices*).
 
     Returns
     -------
@@ -556,6 +766,12 @@ def simulated_annealing(
     lambda_balance, T_start, alpha, stagnation_limit = _sa_hyperparams(
         n, weights, n_total_trans, T_min
     )
+    effective_n_total = n_total if n_total is not None else n
+    if priority == "time":
+        lambda_time = lambda_balance
+        lambda_balance = lambda_balance * 1e-4
+    else:  # "carryover" (default)
+        lambda_time = lambda_balance * 1e-4
 
     best_order: list[int] = []
     best_score = -math.inf
@@ -579,6 +795,9 @@ def simulated_annealing(
             stagnation_limit,
             budget=max_iter - total_iters,
             global_best_score=best_score,
+            lambda_time=lambda_time,
+            position_offset=position_offset,
+            n_total=effective_n_total,
         )
         total_iters += iters_used
         n_restarts += 1
@@ -682,6 +901,7 @@ def _optimize_row_groups(
     fix_indices: list[int],
     seed: int,
     max_iter_arg: Optional[int],
+    priority: str = "carryover",
 ) -> list[int]:
     """
     Run Simulated Annealing sequentially over each row_group and return the
@@ -715,6 +935,9 @@ def _optimize_row_groups(
             prefix_last=prefix_last,
             prefix_tracker=global_tracker,
             n_prefix_transitions=global_trans_count,
+            priority=priority,
+            position_offset=len(final_order),
+            n_total=len(groups),
         )
 
         # Record this row_group's transitions so the next row_group's SA sees
@@ -825,6 +1048,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress the large-list (> 20 items) warning.",
     )
+    p.add_argument(
+        "--priority",
+        choices=["carryover", "time"],
+        default="carryover",
+        metavar="{carryover,time}",
+        help=(
+            "Optimization priority (default: carryover). "
+            "'carryover': minimize run-order carryover; temporal spread of "
+            "each condition is a secondary tie-breaker. "
+            "'time': maximize temporal spread of each condition across the run "
+            "to reduce instrument-drift confounding; transition balance is the "
+            "secondary tie-breaker."
+        ),
+    )
     return p
 
 
@@ -907,6 +1144,7 @@ def main() -> None:
         fix_indices,
         args.seed,
         args.max_iter,
+        args.priority,
     )
 
     # ── Overall transition stats ───────────────────────────────────────────
