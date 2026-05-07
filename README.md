@@ -103,7 +103,7 @@ python randomize_samples_for_lcmsms.py to_randomise.txt --fix-sort 1,2 --priorit
 # Statistics and diagnostics are printed to stderr (terminal), while the randomized list is written to ordered.txt
 python randomize_samples_for_lcmsms.py to_randomise.txt --fix-sort 1,2 > ordered.txt
 
-# Redirect diagnostics to a log file
+# Redirect statistics and diagnostics to a log file
 python randomize_samples_for_lcmsms.py to_randomise.txt --fix-sort 1,2 2> run_order.log > ordered.txt
 ```
 
@@ -117,8 +117,7 @@ At each iteration the algorithm proposes a swap of two positions and evaluates
 the change in a combined score:
 
 ```
-combined = diversity_score  −  λ_bal  · balance_penalty
-                            +  λ_time · spread_bonus
+combined = diversity_score − λ_bal · balance_penalty + λ_time · spread_bonus
 ```
 
 **`diversity_score`** — for each consecutive pair (A, B): sum of `weights[g]`
